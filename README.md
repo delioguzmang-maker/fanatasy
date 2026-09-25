@@ -37,6 +37,8 @@ Un "Yahoo Fantasy Plus + FantasyPros Auto-Pilot" propio que corre en **Google Co
 - Nacua (SNF, 30%) queda en la banca, porque ningún suplente juega después que él.
 - Si Warren sale inactivo, la alineación baja a 99.90.
 
+**Horarios.** Salen de ESPN. Si ESPN no responde (bloquea a Colab), se leen del texto de Yahoo ("Sun 1:00 pm") en la zona horaria de `timezone` (Este por defecto).
+
 **Probabilidad de jugar** (todas configurables): sano 100%, Q 75% (práctica completa 90%, limitada 75%, no practicó 40%), D 10%, O/IR/suspendido 0%. Las noticias frescas de Sleeper (menos de 72 h) pueden subir la gravedad del estado de Yahoo. Además puedes poner probabilidades a mano (`Puka Nacua=30%`).
 
 **Waivers.** Para cada semana que queda se calcula la mejor alineación posible con y sin el cambio. El valor del cambio es la suma de esas diferencias, con más peso en las semanas cercanas (0.92 por semana). Todo se mide contra lo que podrías sacar de agentes libres esa semana: por eso un QB suplente que solo cubre un bye vale poco.
@@ -50,7 +52,12 @@ La puja tiene estos límites:
 - nunca más de lo que puede pujar el rival con más saldo, más $1;
 - si sale un número redondo, sube $1 para no empatar.
 
-Los agentes libres que no están en waivers se agregan sin puja.
+Los agentes libres que no están en waivers se agregan sin puja. Además:
+- nunca propone soltar a un titular de esta semana;
+- pateadores y defensas: máximo $2 (se consiguen gratis casi cada semana);
+- no agrega un tercer QB, un segundo K ni una segunda DEF;
+- solo recomienda un cambio si sube tu alineación al menos 8 pts ponderados (~1 pt por semana);
+- a los lesionados les baja también las semanas siguientes (IR: 4 semanas en cero; Out/Doubtful: la mitad la semana siguiente), porque las proyecciones de Yahoo para semanas futuras los cuentan sanos.
 
 **Trades.** Revisa esto en orden:
 1. los puntos que das y los que recibes;
@@ -104,6 +111,8 @@ Opciones principales (`--config archivo.json`, variables `FA_<OPCION>` o la celd
 | `min_gain` / `gameday_min_gain` | 0.3 / 0.5 | puntos mínimos para cambiar la alineación |
 | `full_budget_ppw` | 8.0 | pts/semana que valdrían todo tu saldo FAAB |
 | `max_bid_pct` | 0.5 | tope de puja como fracción del saldo |
+| `max_bid_kdef` | 2 | tope de puja para K y DEF |
+| `min_claim_gain` | 8.0 | puntos ponderados mínimos para recomendar una puja |
 | `hedge_reliability` | 0.85 | confianza en que el cambio de último minuto se haga |
 | `uncertain_penalty` | 0.75 | margen de riesgo por titular dudoso |
 | `projections` | `yahoo` | `yahoo`, `sleeper` o `blend` |
@@ -115,7 +124,7 @@ pip install -e ".[test,browser]" && python -m playwright install chromium
 python -m pytest -q
 ```
 
-Las 62 pruebas incluyen:
+Las 65 pruebas incluyen:
 - tu alineación real de la Semana 3;
 - los parsers de las páginas de Yahoo;
 - guardar la alineación y pujar contra una copia local del sitio, por HTTP y con un navegador real;

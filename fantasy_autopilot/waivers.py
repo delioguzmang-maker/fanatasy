@@ -24,7 +24,7 @@ from typing import Iterable, Optional, Sequence
 
 from .models import Player
 from .nfl import eligible_slots, norm_name
-from .optimizer import best_total
+from .optimizer import assign, best_total
 
 
 @dataclass
@@ -35,7 +35,10 @@ class WaiverSettings:
     max_pct: float = 0.5
     min_bid: int = 0
     avoid_round: bool = True
-    min_gain: float = 3.0            # discounted lineup points needed to bother
+    min_gain: float = 8.0            # discounted lineup points needed to bother (~1 pt/week)
+    max_bid_kdef: int = 2             # kickers and defenses are streamable: never pay more
+    protect_starters: bool = True     # never drop someone in this week's best lineup
+    position_caps: dict[str, int] = field(default_factory=lambda: {"QB": 2, "TE": 2, "K": 1, "DEF": 1})
     max_claims: int = 2
     drop_candidates: int = 4          # how many of the least valuable players to consider dropping
     replacement_rank: int = 3         # replacement level = n-th best free agent at the position
@@ -129,6 +132,7 @@ def suggest_bid(
     settings: WaiverSettings,
     rival_max_balance: Optional[int] = None,
     on_waivers: bool = True,
+    position: str = "",
 ) -> tuple[int, str]:
     """FAAB bid for a claim worth `gain` discounted lineup points."""
     if not on_waivers:
@@ -148,6 +152,9 @@ def suggest_bid(
     if bid > cap:
         bid = cap
         reason += f"; tope {settings.max_pct:.0%} del saldo = ${cap}"
+    if position in ("K", "DEF") and bid > settings.max_bid_kdef:
+        bid = settings.max_bid_kdef
+        reason += f"; tope ${bid} para {position} (se consiguen gratis casi cada semana)"
     bid = max(settings.min_bid, min(bid, balance))
     if settings.avoid_round and bid >= 5 and bid % 5 == 0 and bid + 1 <= min(balance, max(cap, 1)):
         bid += 1
@@ -186,12 +193,20 @@ def plan_claims(
         drops: list[Optional[Player]] = []
         if len(current) < roster_limit:
             drops.append(None)
+        if settings.protect_starters:
+            this_week = assign(current, slots, lambda p, s: _weekly(p, weeks[0]) + 1e-9)
+            for p in this_week:
+                if p is not None:
+                    costs.pop(p.pid, None)
         cheapest = sorted(costs, key=costs.get)[: settings.drop_candidates]
         drops += [next(p for p in current if p.pid == pid) for pid in cheapest]
         best: Optional[tuple[float, Player, Optional[Player], dict[int, float]]] = None
         for cand in pool:
             for drop in drops:
                 trial = [p for p in current if drop is None or p.pid != drop.pid] + [cand]
+                cap = settings.position_caps.get(cand.position)
+                if cap is not None and sum(1 for p in trial if p.position == cand.position) > cap:
+                    continue  # e.g. a third QB just to cover one bye week
                 value, per_week = lineup_value(trial, slots, weeks, settings.discount, repl)
                 gain = value - base
                 if best is None or gain > best[0] + 1e-9:
@@ -200,7 +215,7 @@ def plan_claims(
             break
         gain, cand, drop, by_week = best
         on_waivers = cand.owner.upper().startswith("W")
-        bid, reason = suggest_bid(gain, weeks, budget, settings, rival_max_balance, on_waivers)
+        bid, reason = suggest_bid(gain, weeks, budget, settings, rival_max_balance, on_waivers, cand.position)
         claims.append(ClaimPlan(cand, drop, gain, by_week, bid, reason, on_waivers,
                                 next_weeks=[_weekly(cand, w) for w in weeks[:4]]))
         current = [p for p in current if drop is None or p.pid != drop.pid] + [cand]

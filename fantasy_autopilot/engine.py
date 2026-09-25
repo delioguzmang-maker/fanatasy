@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -148,6 +149,7 @@ class Autopilot:
             full_budget_ppw=self.cfg.full_budget_ppw, max_pct=self.cfg.max_bid_pct,
             min_bid=self.cfg.min_bid, max_claims=self.cfg.max_claims,
             min_gain=self.cfg.min_claim_gain, never_drop=set(self.cfg.never_drop),
+            max_bid_kdef=self.cfg.max_bid_kdef,
         )
 
     def browser(self) -> Any:
@@ -261,6 +263,7 @@ class Autopilot:
         """Kickoff times (ESPN), injury news (Sleeper), probabilities of playing."""
         now = self.now_fn()
         games = self.games(week)
+        from_text = 0
         for p in players:
             g = games.get(p.team)
             if g is not None:
@@ -269,6 +272,22 @@ class Autopilot:
                     p.locked = True
             elif len(games) >= 10 and p.team:
                 p.on_bye = True  # full slate known and his team is not in it
+            else:
+                # ESPN unavailable (it blocks some cloud IPs, e.g. Colab): use Yahoo's own
+                # "Sun 1:00 pm" text, read in the configured time zone.
+                p.kickoff = kickoff_from_text(p.game_text, now, self.tz)
+                if p.kickoff is not None:
+                    from_text += 1
+                    if p.kickoff <= now:
+                        p.locked = True
+                if re.search(r"\bFinal\b", p.game_text):
+                    p.locked = True
+        if from_text:
+            self.warnings.append(f"horarios tomados del texto de Yahoo ({from_text} jugadores), hora de {self.cfg.timezone}")
+        missing_time = [p.name for p in players if p.kickoff is None and not p.on_bye and p.slot != "IR"]
+        if missing_time:
+            self.warnings.append("sin hora de partido para: " + ", ".join(missing_time[:6])
+                                 + " (sin hora no se planean cambios de último minuto para ellos)")
         if self.sleeper:
             try:
                 self._merge_sleeper(players, now)
@@ -469,8 +488,7 @@ class Autopilot:
                 p.weekly = {}
             if not p.weekly:  # fall back to this week's projection, flat
                 p.weekly = {w: p.proj for w in horizon(week, self.waiver_settings())}
-            if is_out(p.status):
-                p.weekly[week] = 0.0
+            apply_injury_outlook(p, week)
 
     def waivers(self, week: Optional[int] = None) -> RunResult:
         self.warnings = []
@@ -628,3 +646,39 @@ class Autopilot:
 
 def _pct(x: float) -> str:
     return f"{x * 100:.0f}%"
+
+
+_DAYS = {"tue": 0, "wed": 1, "thu": 2, "fri": 3, "sat": 4, "sun": 5, "mon": 6}
+_KICK_RE = re.compile(r"\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(\d{1,2}):(\d{2})\s*([ap]m)", re.I)
+
+
+def kickoff_from_text(text: str, now: datetime, tz: ZoneInfo) -> Optional[datetime]:
+    """'Sun 8:20 pm' -> that day of the current Yahoo week (Tuesday..Monday), in UTC."""
+    m = _KICK_RE.search(text or "")
+    if not m:
+        return None
+    day, hour, minute, ampm = m.group(1).lower(), int(m.group(2)), int(m.group(3)), m.group(4).lower()
+    hour = hour % 12 + (12 if ampm == "pm" else 0)
+    local_now = now.astimezone(tz)
+    week_start = local_now.date() - timedelta(days=(local_now.weekday() - 1) % 7)  # last Tuesday
+    date = week_start + timedelta(days=_DAYS[day])
+    return datetime(date.year, date.month, date.day, hour, minute, tzinfo=tz).astimezone(timezone.utc)
+
+
+def apply_injury_outlook(p: Player, week: int) -> None:
+    """Yahoo's future-week projections assume everyone is healthy. Discount the
+    next weeks for injured players: IR-type out 4 weeks, Out/Doubtful half next
+    week, and this week times the chance of playing."""
+    if not p.weekly:
+        return
+    if p.status in ("IR", "PUP", "NFI", "SUSP"):
+        factors = {week + i: 0.0 for i in range(4)}
+    elif p.status in ("O", "NA", "D"):
+        factors = {week: p.prob if p.status == "D" else 0.0, week + 1: 0.5}
+    elif p.status == "Q":
+        factors = {week: p.prob}
+    else:
+        factors = {}
+    for w, f in factors.items():
+        if w in p.weekly:
+            p.weekly[w] = round(p.weekly[w] * f, 2)

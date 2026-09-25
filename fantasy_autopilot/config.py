@@ -44,7 +44,8 @@ class Config:
     max_bid_pct: float = 0.5
     min_bid: int = 0
     max_claims: int = 2
-    min_claim_gain: float = 3.0
+    min_claim_gain: float = 8.0
+    max_bid_kdef: int = 2
     never_drop: list[str] = field(default_factory=list)
     last_week: int = 17
     discount: float = 0.92

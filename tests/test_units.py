@@ -205,3 +205,49 @@ def test_config_from_env(monkeypatch):
     assert cfg.ntfy_topic == "mi-tema-secreto"
     with pytest.raises(ValueError):
         Config(mode="loco")
+
+
+# ------------------------------------------------------------------ fixes from the first real run
+
+def test_kickoff_from_yahoo_text_when_espn_is_blocked():
+    from zoneinfo import ZoneInfo
+    from fantasy_autopilot.engine import kickoff_from_text
+    tz = ZoneInfo("America/New_York")
+    friday = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
+    assert kickoff_from_text("Sun 8:20 pm vs Den", friday, tz) == datetime(2026, 9, 28, 0, 20, tzinfo=timezone.utc)
+    assert kickoff_from_text("Sun 1:00 pm @ Cin", friday, tz) == datetime(2026, 9, 27, 17, 0, tzinfo=timezone.utc)
+    assert kickoff_from_text("Mon 8:15 pm vs Chi", friday, tz) == datetime(2026, 9, 29, 0, 15, tzinfo=timezone.utc)
+    assert kickoff_from_text("Final W 24-17 vs Hou", friday, tz) is None
+
+
+def test_injured_players_are_discounted_in_future_weeks_too():
+    from fantasy_autopilot.engine import apply_injury_outlook
+    collins = p("1", "Collins", "WR", flat(12.0))
+    collins.status, collins.p_play = "D", 0.10
+    apply_injury_outlook(collins, 3)
+    assert collins.weekly[3] == pytest.approx(1.2) and collins.weekly[4] == 6.0 and collins.weekly[5] == 12.0
+    pierce = p("2", "Pierce", "WR", flat(8.0))
+    pierce.status = "IR"
+    apply_injury_outlook(pierce, 3)
+    assert [pierce.weekly[w] for w in (3, 4, 5, 6, 7)] == [0, 0, 0, 0, 8.0]
+
+
+def test_no_claim_drops_a_starter_or_overpays_a_kicker_or_adds_a_third_qb():
+    """Regression for the first real run: 'Mevis for Worthy $7' and 'Brissett for Bateman'."""
+    roster = small_roster()
+    roster[0].weekly[8] = 0.0                                  # QB1 bye
+    fa = [
+        p("40", "Mevis", "K", flat(8.46), owner="W (Wed)"),     # +0.46/week over our K
+        p("41", "Brissett", "QB", flat(18.7), owner="FA"),
+    ]
+    claims = plan_claims(roster, fa, SLOTS, 3, roster_limit=12, balance=100)
+    assert claims == []                                         # neither clears the minimum gain
+    loose = WaiverSettings(min_gain=0.1)
+    claims = plan_claims(roster, fa, SLOTS, 3, 12, 100, loose)
+    starters_now = {"QB1", "RB1", "RB2", "WR1", "WR2", "FLEX", "TE", "K", "DEF"}
+    for c in claims:
+        assert c.drop is None or c.drop.name not in starters_now
+        if c.add.name == "Brissett":
+            assert c.drop is not None and c.drop.position == "QB"  # swap, never a third QB
+        if c.add.position == "K":
+            assert c.bid <= 2

@@ -41,7 +41,7 @@ _STATUS_TOKEN_RE = re.compile(
     r"(?<![\w-])(Q|D|O|IR-R|IR|PUP-R|PUP-P|PUP|NFI-R|NFI-A|NFI|SUSP|NA|COVID-19)(?![\w-])"
 )
 _GAME_RE = re.compile(
-    r"((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{1,2}:\d{2}\s*[ap]m\s*(?:vs|@)\s*[A-Za-z]{2,4}"
+    r"((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{1,2}:\d{2}\s*[ap]m(?:\s*(?:vs|@)\s*[A-Za-z]{2,4})?"
     r"|Final\s+[WLT]\s+\d+-\d+\s*(?:vs|@)\s*[A-Za-z]{2,4}"
     r"|Bye)",
     re.I,

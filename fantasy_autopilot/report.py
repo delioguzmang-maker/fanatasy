@@ -189,7 +189,7 @@ def matchup_report(
     wp_fixed: float,
 ) -> str:
     lines = [f"Semana {week}: {my_name} vs {opp_name}"]
-    if yahoo_mine is not None and yahoo_opp is not None:
+    if yahoo_mine and yahoo_opp:  # 0.00 means we read the live score, not the projection
         lines.append(f"Yahoo proyecta {yahoo_mine:.2f} vs {yahoo_opp:.2f}")
     lines.append(f"Tu valor esperado (con riesgo de inactivos): {my_mean:.2f}")
     lines.append(f"Rival tal como está: {audit.current:.2f} · si corrige su alineación: {audit.optimal:.2f} "
