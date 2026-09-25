@@ -1,0 +1,70 @@
+# Fantasy autopilot 24/7 (optional). Runs only after you set the repository
+# variable AUTOPILOT_ENABLED=true and the secrets listed in README ("24/7").
+# Times are UTC (Eastern = UTC-4 until early November, then UTC-5).
+# GitHub only runs schedules from the repository's default branch.
+name: Fantasy autopilot
+
+on:
+  schedule:
+    - cron: "7 14 * * *"         # every day ~10:07 ET: weekly lineup
+    - cron: "37 22 * * 2"        # Tuesday ~6:37 pm ET: waivers + FAAB
+    - cron: "*/15 22,23 * * 4"   # Thursday night game
+    - cron: "*/15 0,1 * * 5"
+    - cron: "*/15 13-23 * * 6"   # Saturday games (late season)
+    - cron: "*/15 11-23 * * 0"   # Sunday: 9:30 am, 1 pm, 4 pm windows
+    - cron: "*/15 0,1 * * 1"     # Sunday night game
+    - cron: "*/15 22,23 * * 1"   # Monday night game
+    - cron: "*/15 0,1 * * 2"
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Tarea"
+        type: choice
+        options: [lineup, gameday, waivers, matchup]
+        default: lineup
+
+concurrency:
+  group: fantasy-autopilot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    if: vars.AUTOPILOT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e .
+      - name: Choose task
+        id: task
+        run: |
+          case "${{ github.event.schedule }}" in
+            "7 14 * * *") echo "task=lineup" >> "$GITHUB_OUTPUT" ;;
+            "37 22 * * 2") echo "task=waivers" >> "$GITHUB_OUTPUT" ;;
+            "") echo "task=${{ inputs.task }}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "task=gameday" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Install browser (automatic claims only)
+        if: steps.task.outputs.task == 'waivers' && vars.FA_AUTO_CLAIMS == 'true'
+        run: pip install playwright && python -m playwright install --with-deps chromium
+      - uses: actions/cache@v4
+        with:
+          path: .fantasy_autopilot
+          key: fa-state-${{ github.run_id }}
+          restore-keys: fa-state-
+      - name: Run
+        run: python -m fantasy_autopilot ${{ steps.task.outputs.task }}
+        env:
+          YAHOO_COOKIES: ${{ secrets.YAHOO_COOKIES }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          FA_CONFIG_JSON: ${{ secrets.FA_CONFIG_JSON }}
+          FA_LEAGUE_ID: ${{ vars.FA_LEAGUE_ID }}
+          FA_TEAM_ID: ${{ vars.FA_TEAM_ID }}
+          FA_MODE: ${{ vars.FA_MODE || 'sugerir' }}
+          FA_AUTO_CLAIMS: ${{ vars.FA_AUTO_CLAIMS || 'false' }}
+          FA_SAVE_EVIDENCE: "false"
+          FA_QUIET: "true"   # this repository is public: logs show titles only

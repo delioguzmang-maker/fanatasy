@@ -1,0 +1,20 @@
+# Credentials and personal state: never commit
+.env
+cookies*.txt
+*cookies*.json
+storageState.json
+config.local.json
+.fantasy_autopilot/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Notebooks
+.ipynb_checkpoints/
