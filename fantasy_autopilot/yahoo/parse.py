@@ -89,6 +89,7 @@ class TeamRow:
     status_raw: str = ""
     game_text: str = ""
     on_bye: bool = False
+    raw_text: str = ""
 
 
 @dataclass
@@ -244,6 +245,7 @@ def parse_team_page(html: str) -> TeamPage:
                     status_raw=raw,
                     game_text=game_text,
                     on_bye=bool(re.search(r"\bBye\b", game_text, re.I)),
+                    raw_text=cell_text[:200],
                 )
             )
 

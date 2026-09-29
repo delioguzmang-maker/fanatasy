@@ -93,6 +93,17 @@ class YahooWeb:
         page = self.get(f"/{team_id or self.team_id}", params)
         return page, parse.parse_team_page(page.html)
 
+    def team_points(self, team_id: Optional[str] = None, week: Optional[int] = None) -> dict[str, float]:
+        """Fantasy points actually scored this week (the team page's default stats view)."""
+        params = {"week": str(week)} if week else None
+        page = self.get(f"/{team_id or self.team_id}", params)
+        return {r.pid: r.proj for r in parse.parse_team_page(page.html).rows if r.proj is not None}
+
+    def search_players(self, name: str) -> list[parse.ListedPlayer]:
+        """Yahoo's player search (all players, owned or not)."""
+        params = {"search": name, "status": "ALL", "pos": "ALL", "stat1": "K_K", "count": "0"}
+        return parse.parse_players_page(self.get("/players", params).html, self.base_url)
+
     def league_home(self, week: Optional[int] = None) -> Page:
         params = {"matchup_week": str(week), "module": "matchups"} if week else None
         return self.get("", params)

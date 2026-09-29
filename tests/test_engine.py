@@ -147,3 +147,59 @@ def test_expired_session_becomes_urgent_notification(tmp_path):
         p.web.session.cookies.clear()
         res = p.run("lineup")
         assert res.urgent and "Sesión de Yahoo vencida" in res.title
+
+
+# ------------------------------------------------------------------ after the first real run
+
+MONDAY_NIGHT = datetime(2026, 9, 29, 0, 25, tzinfo=timezone.utc)   # Mon 8:25 pm ET, week 3 over
+
+
+def finished(games):
+    return [Game(g.home, g.away, g.kickoff, "post") for g in games]
+
+
+def test_waivers_ignore_points_already_scored(tmp_path):
+    """Monday run: week 3 shows real points (20.0 for a TE who got lucky); only weeks 4+ count."""
+    with MockYahoo() as mock:
+        mock.first_projected = 4
+        mock.free_agents["30150"] = ("Michael Pittman Jr.", "WR", "Waivers (Sep 30)", {**{w: 7.0 for w in range(1, 18)}, 3: 40.0})
+        res = pilot(mock, tmp_path, now=MONDAY_NIGHT).waivers()
+        assert res.data["claims"] == []                      # 7 pts/week never beats the starters
+        assert "semana 4" in res.title
+        pitt = next(c for c in res.data["candidates"] if c.pid == "30150")
+        assert 3 not in pitt.weekly and pitt.owner == "W (Sep 30)"
+
+
+def test_matchup_uses_real_points_once_games_are_over(tmp_path):
+    with MockYahoo() as mock:
+        p = pilot(mock, tmp_path, now=MONDAY_NIGHT)
+        p.games_fetcher = lambda season, week: finished(GAMES)
+        res = p.matchup()
+        assert "Puntos ya anotados: 103.41 vs 99.42" in res.text
+        assert "GANASTE" in res.text and res.data["win_probability"] == 1.0
+        assert "Errores" not in res.text                      # nothing left to fix
+
+
+def test_lineup_after_the_week_is_closed(tmp_path):
+    with MockYahoo() as mock:
+        p = pilot(mock, tmp_path, now=MONDAY_NIGHT)
+        p.games_fetcher = lambda season, week: finished(GAMES)
+        res = p.lineup()
+        assert res.title == "Semana 3 cerrada" and not res.changed
+
+
+def test_trade_for_a_free_agent_says_use_waivers(tmp_path):
+    with MockYahoo() as mock:
+        res = pilot(mock, tmp_path).trade(give=["Rashod Bateman"], get=["Michael Pittman Jr."])
+        assert "no tiene dueño" in res.text and "waivers" in res.text
+        assert "Veredicto" in res.text
+
+
+def test_preview_next_opponent(tmp_path):
+    with MockYahoo() as mock:
+        res = pilot(mock, tmp_path).preview()
+        pv = res.data
+        assert pv["opp_name"] == "Rival FC" and pv["week"] == 3
+        assert len(pv["slots"]) == 9
+        assert "Posición por posición" in res.text and "Estrategia" in res.text
+        assert 0 < pv["win_probability"] < 1

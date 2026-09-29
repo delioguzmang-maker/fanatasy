@@ -251,3 +251,18 @@ def test_no_claim_drops_a_starter_or_overpays_a_kicker_or_adds_a_third_qb():
             assert c.drop is not None and c.drop.position == "QB"  # swap, never a third QB
         if c.add.position == "K":
             assert c.bid <= 2
+
+
+def test_nflverse_schedule_parsing():
+    from fantasy_autopilot.sources.schedule import parse_games_csv
+    csv_text = (
+        "game_id,season,game_type,week,gameday,weekday,gametime,away_team,away_score,home_team,home_score\n"
+        "2026_03_DEN_LA,2026,REG,3,2026-09-27,Sunday,20:20,DEN,,LA,\n"
+        "2026_03_NE_JAX,2026,REG,3,2026-09-27,Sunday,13:00,NE,17,JAX,24\n"
+        "2026_04_X_Y,2026,REG,4,2026-10-04,Sunday,13:00,NYG,,WAS,\n"
+    )
+    friday = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
+    games = {g.home: g for g in parse_games_csv(csv_text, 2026, 3, now=friday)}
+    assert set(games) == {"LAR", "JAX"}
+    assert games["LAR"].kickoff == datetime(2026, 9, 28, 0, 20, tzinfo=timezone.utc)
+    assert games["LAR"].state == "pre" and games["JAX"].state == "post"

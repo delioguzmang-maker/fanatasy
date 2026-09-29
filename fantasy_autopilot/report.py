@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
-from .matchup import LineupAudit
+from .matchup import LineupAudit, TeamOutlook
 from .models import LineupPlan, Move, Player, WriteResult
 from .optimizer import OptimizerSettings, breakeven_probability
 from .trade import TradeReport
@@ -181,24 +181,64 @@ def matchup_report(
     week: int,
     my_name: str,
     opp_name: str,
-    my_mean: float,
-    yahoo_mine: Optional[float],
-    yahoo_opp: Optional[float],
+    mine: TeamOutlook,
+    opp: TeamOutlook,
     audit: LineupAudit,
     wp_now: float,
     wp_fixed: float,
 ) -> str:
     lines = [f"Semana {week}: {my_name} vs {opp_name}"]
-    if yahoo_mine and yahoo_opp:  # 0.00 means we read the live score, not the projection
-        lines.append(f"Yahoo proyecta {yahoo_mine:.2f} vs {yahoo_opp:.2f}")
-    lines.append(f"Tu valor esperado (con riesgo de inactivos): {my_mean:.2f}")
-    lines.append(f"Rival tal como está: {audit.current:.2f} · si corrige su alineación: {audit.optimal:.2f} "
-                 f"({audit.fixable:+.2f})")
-    lines.append(f"Probabilidad de ganar (modelo normal): {_pct(wp_now)} hoy · {_pct(wp_fixed)} si el rival corrige")
+    if mine.scored or opp.scored:
+        lines.append(f"Puntos ya anotados: {mine.scored:.2f} vs {opp.scored:.2f} "
+                     f"(les faltan por jugar: tú {mine.pending}, rival {opp.pending})")
+    lines.append(f"Final esperado: {mine.mean:.2f} vs {opp.mean:.2f}")
+    if audit.fixable > 0.01:
+        lines.append(f"Si el rival corrige lo que todavía puede mover: {opp.mean + audit.fixable:.2f} ({audit.fixable:+.2f})")
+    if mine.pending == 0 and opp.pending == 0:
+        lines.append("Todos los partidos terminaron: " + ("GANASTE" if wp_now > 0.5 else "perdiste" if wp_now < 0.5 else "empate"))
+    else:
+        lines.append(f"Probabilidad de ganar (modelo normal): {_pct(wp_now)}"
+                     + (f" · {_pct(wp_fixed)} si el rival corrige" if audit.fixable > 0.01 else ""))
     if audit.issues:
-        lines.append("Errores en la alineación del rival:")
+        lines.append("Errores que el rival todavía puede corregir:")
         lines += [f"  • {x}" for x in audit.issues]
     lines.append("La probabilidad es una estimación con volatilidades típicas por posición, no un dato de Yahoo.")
+    return "\n".join(lines)
+
+
+def preview_report(pv: dict) -> str:
+    """Next-opponent scouting report (see Autopilot.preview)."""
+    lines = [f"Semana {pv['week']}: {pv['my_name']} vs {pv['opp_name']}"]
+    hist = pv["history"]
+    if hist:
+        lines.append("Resultados anteriores (tú / rival):")
+        for h in hist:
+            mine = "—" if h["mine"] is None else f"{h['mine']:.2f} ({h['mine_result']})"
+            his = "—" if h["opp"] is None else f"{h['opp']:.2f} ({h['opp_result']})"
+            lines.append(f"  S{h['week']}: {mine}  /  {his}")
+        mine_avg, opp_avg = pv["my_avg"], pv["opp_avg"]
+        if mine_avg is not None and opp_avg is not None:
+            lines.append(f"Promedio: tú {mine_avg:.2f} · rival {opp_avg:.2f} ({mine_avg - opp_avg:+.2f})")
+    lines.append(f"Proyección de la semana {pv['week']} (mejor alineación de cada uno): "
+                 f"tú {pv['my_total']:.2f} · rival {pv['opp_total']:.2f} ({pv['my_total'] - pv['opp_total']:+.2f})")
+    lines.append(f"Probabilidad de ganar (modelo normal): {_pct(pv['win_probability'])}")
+    lines.append("Posición por posición (puntos esperados, ya descontado el riesgo de lesión):")
+    for row in pv["slots"]:
+        m, o = row["mine"], row["opp"]
+        ms = f"{m.name} {m.expected:.1f}" if m else "(vacío)"
+        os_ = f"{o.name} {o.expected:.1f}" if o else "(vacío)"
+        lines.append(f"  {row['slot']:<6} {ms:<28} vs {os_:<28} {row['diff']:+.1f}")
+    for who, byes in (("Tus", pv["my_byes"]), ("Sus", pv["opp_byes"])):
+        if byes:
+            lines.append(f"{who} jugadores en semana de descanso: {', '.join(byes)}")
+    lines.append("Estrategia:")
+    lines += [f"  • {s}" for s in pv["strategy"]]
+    if pv["targets"]:
+        lines.append(f"Agentes libres que suben tu alineación de la semana {pv['week']}:")
+        for t in pv["targets"]:
+            lines.append(f"  • {t['name']} ({t['pos']}, {t['avail']}): {t['proj']:.2f} proyectados, "
+                         f"+{t['gain']:.2f} a tu alineación esa semana; promedio resto {t['ros']:.2f}")
+        lines.append("  (Para cuánto pujar usa la celda de waivers: calcula el valor de todo lo que queda.)")
     return "\n".join(lines)
 
 

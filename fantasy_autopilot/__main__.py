@@ -1,6 +1,6 @@
 """Command line: python -m fantasy_autopilot <task> [--config config.json]
 
-Tasks: check, lineup, gameday, waivers, matchup, trade, loop.
+Tasks: check, lineup, gameday, waivers, matchup, preview, trade, loop.
 Cookies come from the YAHOO_COOKIES environment variable (or --cookies FILE).
 Settings come from --config and/or FA_* environment variables.
 """
@@ -32,7 +32,7 @@ def build(args: argparse.Namespace) -> Autopilot:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="fantasy_autopilot", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("task", choices=["check", "lineup", "gameday", "waivers", "matchup", "trade", "loop"])
+    ap.add_argument("task", choices=["check", "lineup", "gameday", "waivers", "matchup", "preview", "trade", "loop"])
     ap.add_argument("--config", help="archivo JSON de configuración")
     ap.add_argument("--cookies", help="archivo con las cookies (si no, variable YAHOO_COOKIES)")
     ap.add_argument("--mode", choices=["sugerir", "simulacro", "automatico"])

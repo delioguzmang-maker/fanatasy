@@ -6,7 +6,8 @@ Un "Yahoo Fantasy Plus + FantasyPros Auto-Pilot" propio que corre en **Google Co
 - **Cambios automáticos antes de cada partido**: si un titular sale *Out*/inactivo, entra el mejor suplente que todavía no haya jugado.
 - **Jugadores dudosos (Q/D) con números**: probabilidad de que jueguen, y si hay un suplente que juegue igual o más tarde para cubrirlos (el caso Nacua de la Semana 2).
 - **Waivers y pujas FAAB**: a quién agregar, a quién soltar y cuánto pujar; puede enviar los reclamos solo.
-- **Rival y probabilidad de ganar**, con los errores de la alineación del rival.
+- **Rival y probabilidad de ganar**, con los errores de la alineación del rival (con puntos reales cuando ya se jugó).
+- **Próximo rival**: resultados anteriores de los dos, posición por posición, semanas de descanso, estrategia y agentes libres que suben tu alineación de esa semana.
 - **Evaluador de trades** que suma puntos antes de opinar.
 - **Avisos al celular** con la app gratis [ntfy](https://ntfy.sh) (también Telegram o correo).
 
@@ -37,7 +38,7 @@ Un "Yahoo Fantasy Plus + FantasyPros Auto-Pilot" propio que corre en **Google Co
 - Nacua (SNF, 30%) queda en la banca, porque ningún suplente juega después que él.
 - Si Warren sale inactivo, la alineación baja a 99.90.
 
-**Horarios.** Salen de ESPN. Si ESPN no responde (bloquea a Colab), se leen del texto de Yahoo ("Sun 1:00 pm") en la zona horaria de `timezone` (Este por defecto).
+**Horarios.** Salen de ESPN; como ESPN bloquea a Colab, el respaldo es el calendario público de [nflverse](https://github.com/nflverse/nfldata) en GitHub, y como último recurso el texto de Yahoo ("Sun 1:00 pm"). Cuando un partido ya empezó o terminó se usan los **puntos reales** de Yahoo, no la proyección.
 
 **Probabilidad de jugar** (todas configurables): sano 100%, Q 75% (práctica completa 90%, limitada 75%, no practicó 40%), D 10%, O/IR/suspendido 0%. Las noticias frescas de Sleeper (menos de 72 h) pueden subir la gravedad del estado de Yahoo. Además puedes poner probabilidades a mano (`Puka Nacua=30%`).
 
@@ -96,6 +97,7 @@ python -m fantasy_autopilot lineup             # alineación de la semana
 python -m fantasy_autopilot gameday --force    # revisión de inactivos
 python -m fantasy_autopilot waivers            # pujas FAAB
 python -m fantasy_autopilot matchup
+python -m fantasy_autopilot preview            # próximo rival y estrategia
 python -m fantasy_autopilot trade --give "Nico Collins" --get "Josh Allen"
 python -m fantasy_autopilot loop --hours 10 --every 10
 ```
@@ -124,7 +126,7 @@ pip install -e ".[test,browser]" && python -m playwright install chromium
 python -m pytest -q
 ```
 
-Las 65 pruebas incluyen:
+Las 71 pruebas incluyen:
 - tu alineación real de la Semana 3;
 - los parsers de las páginas de Yahoo;
 - guardar la alineación y pujar contra una copia local del sitio, por HTTP y con un navegador real;

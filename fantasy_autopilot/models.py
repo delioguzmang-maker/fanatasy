@@ -31,6 +31,9 @@ class Player:
     percent_owned: Optional[float] = None
     sleeper_id: Optional[str] = None
     notes: list[str] = field(default_factory=list)
+    actual: Optional[float] = None    # fantasy points scored so far this week
+    game_state: str = ""              # pre / in / post ("" = unknown)
+    raw_text: str = ""                # Yahoo's player cell text (diagnostics)
 
     def __post_init__(self) -> None:
         self.slot = norm_slot(self.slot) or "BN"
@@ -50,6 +53,14 @@ class Player:
 
     def can_fill(self, slot: str) -> bool:
         return norm_slot(slot) in self.eligible
+
+    def outlook(self) -> tuple[float, float]:
+        """(expected final points this week, how much of the projection is still open 0..1)."""
+        if self.game_state == "post" and self.actual is not None:
+            return self.actual, 0.0
+        if self.game_state == "in" and self.actual is not None:
+            return self.actual + max(0.0, self.proj - self.actual) * 0.5, 0.5
+        return self.expected, 1.0
 
     def label(self) -> str:
         tag = f" ({self.status})" if self.status else ""

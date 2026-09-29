@@ -20,9 +20,46 @@ def lineup_sd(players: Iterable[Player]) -> float:
 
 
 def win_probability(my_mean: float, my_sd: float, opp_mean: float, opp_sd: float) -> float:
-    sd = math.sqrt(my_sd ** 2 + opp_sd ** 2) or 1.0
+    sd = math.sqrt(my_sd ** 2 + opp_sd ** 2)
+    if sd < 1e-9:  # every game is over: the score decides
+        return 1.0 if my_mean > opp_mean else 0.0 if my_mean < opp_mean else 0.5
     z = (my_mean - opp_mean) / sd
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+@dataclass
+class TeamOutlook:
+    mean: float        # expected final score (points already scored + what is still to come)
+    sd: float          # uncertainty of what is still to come
+    scored: float      # points already on the board
+    pending: int       # starters whose game has not finished
+
+
+def team_outlook(starters: Iterable[Player]) -> TeamOutlook:
+    mean = var = scored = 0.0
+    pending = 0
+    for p in starters:
+        m, still_open = p.outlook()
+        mean += m
+        var += (CV.get(p.position, 0.6) * max(p.proj, 0.0) * still_open) ** 2
+        if p.game_state in ("in", "post") and p.actual is not None:
+            scored += p.actual
+        if p.game_state != "post":
+            pending += 1
+    return TeamOutlook(mean, math.sqrt(var), scored, pending)
+
+
+def started(p: Player) -> bool:
+    return p.game_state in ("in", "post")
+
+
+def movable_part(players: Sequence[Player], slots: Sequence[str]) -> tuple[list[Player], list[str]]:
+    """Players whose games have not started, and the slots they can still fill."""
+    free = list(slots)
+    for p in players:
+        if p.is_starter and started(p) and p.slot in free:
+            free.remove(p.slot)
+    return [p for p in players if p.slot != "IR" and not started(p)], free
 
 
 @dataclass

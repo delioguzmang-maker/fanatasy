@@ -5,9 +5,12 @@ import sys
 import types
 from pathlib import Path
 
+from datetime import datetime, timezone
+
 from fantasy_autopilot.config import Config
 from mock_yahoo import LEAGUE, TEAM, MockYahoo
 
+FRIDAY = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
 NOTEBOOK = Path(__file__).resolve().parents[1] / "FantasyAutopilot.ipynb"
 
 
@@ -38,7 +41,9 @@ def test_notebook_cells_run_against_mock(tmp_path, monkeypatch, capsys):
         cfg = Config(league_id=LEAGUE, team_id=TEAM, state_dir=str(tmp_path), quiet=True,
                      use_sleeper=False, use_espn=False, request_delay=0, yahoo_base_url=mock.base_url)
         ns = {"cfg": cfg, "display": print}
-        for src in cells[2:7]:  # 3. connect, 4. lineup, 5. matchup, 6. waivers, 7. trade
+        exec(compile(cells[2], "cell", "exec"), ns)          # 3. connect
+        ns["pilot"].now_fn = lambda: FRIDAY                   # before week 3's games
+        for src in cells[3:8]:  # 4. lineup, 5. matchup, 5b. next opponent, 6. waivers, 7. trade
             exec(compile(src, "cell", "exec"), ns)
     out = capsys.readouterr().out
     assert "Semana 3" in out
@@ -46,4 +51,5 @@ def test_notebook_cells_run_against_mock(tmp_path, monkeypatch, capsys):
     assert "Rival FC" in out
     assert "Waivers semana 3" in out
     assert "NEUTRAL" in out
+    assert "Posición por posición" in out
     assert not mock.posts  # default mode "sugerir" never writes

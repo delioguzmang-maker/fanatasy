@@ -24,18 +24,20 @@ from zoneinfo import ZoneInfo
 
 from . import report as rpt
 from .config import Config
-from .matchup import audit_lineup, lineup_sd, win_probability
+from .matchup import audit_lineup, lineup_sd, movable_part, started, team_outlook, win_probability
 from .models import Game, Player, Roster, WriteResult
-from .nfl import eligible_slots, norm_name
+from .nfl import eligible_slots, norm_name, norm_team
 from .notify import Notifier
 from .optimizer import (
     OptimizerSettings,
+    assign,
+    best_total,
     current_plan,
     optimize_lineup,
     plan_moves,
     plan_objective,
 )
-from .sources import espn
+from .sources import espn, schedule
 from .sources.sleeper import Sleeper, injury_fields
 from .status import DEFAULT_PROBS, SEVERITY, apply_status_model, is_out, norm_status
 from .trade import evaluate_trade
@@ -107,6 +109,7 @@ class Autopilot:
         browser: Any = None,
         games_fetcher: Optional[Callable[[int, int], list[Game]]] = None,
         now_fn: Optional[Callable[[], datetime]] = None,
+        schedule_fetcher: Optional[Callable[[int, int], list[Game]]] = schedule.week_games,
     ):
         self.cfg = config
         self.cookies = cookies
@@ -123,6 +126,7 @@ class Autopilot:
         )
         self._browser = browser
         self.games_fetcher = games_fetcher or espn.week_games
+        self.schedule_fetcher = schedule_fetcher
         self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self.tz = ZoneInfo(config.timezone)
         self.state = State(config.state_path / "state.json")
@@ -209,13 +213,25 @@ class Autopilot:
         return self._settings
 
     def games(self, week: int) -> dict[str, Game]:
+        """Kickoff times: ESPN first, then the public nflverse schedule (ESPN blocks Colab)."""
         if week not in self._games:
             self._games[week] = {}
             if self.cfg.use_espn:
-                try:
-                    self._games[week] = espn.games_by_team(self.games_fetcher(self.season(), week))
-                except Exception as exc:  # noqa: BLE001
-                    self.warnings.append(f"ESPN no respondió (sin horarios de partidos): {exc}")
+                errors = []
+                for name, fetch in (("ESPN", self.games_fetcher), ("nflverse", self.schedule_fetcher)):
+                    if fetch is None:
+                        continue
+                    try:
+                        found = fetch(self.season(), week)
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(f"{name}: {exc}")
+                        continue
+                    if found:
+                        self._games[week] = espn.games_by_team(found)
+                        break
+                    errors.append(f"{name}: sin partidos de la semana {week}")
+                if not self._games[week]:
+                    self.warnings.append("sin calendario de partidos (" + "; ".join(errors) + ")")
         return self._games[week]
 
     def resolve(self, names: Sequence[str], players: Sequence[Player]) -> set[str]:
@@ -252,6 +268,7 @@ class Autopilot:
                 ir_eligible=r.ir_eligible,
                 on_bye=r.on_bye,
                 game_text=r.game_text,
+                raw_text=r.raw_text,
             ))
         return Roster(
             league_id=self.cfg.league_id, team_id=str(team_id or self.cfg.team_id), week=week, slots=slots,
@@ -268,26 +285,33 @@ class Autopilot:
             g = games.get(p.team)
             if g is not None:
                 p.kickoff = g.kickoff
+                p.game_state = g.state if g.state in ("pre", "in", "post") else ""
                 if g.state in ("in", "post") or g.kickoff <= now:
                     p.locked = True
+                    p.game_state = p.game_state if p.game_state != "pre" else "in"
             elif len(games) >= 10 and p.team:
                 p.on_bye = True  # full slate known and his team is not in it
             else:
-                # ESPN unavailable (it blocks some cloud IPs, e.g. Colab): use Yahoo's own
-                # "Sun 1:00 pm" text, read in the configured time zone.
+                # no schedule at all: use Yahoo's own "Sun 1:00 pm" text (configured time zone)
                 p.kickoff = kickoff_from_text(p.game_text, now, self.tz)
                 if p.kickoff is not None:
                     from_text += 1
                     if p.kickoff <= now:
                         p.locked = True
-                if re.search(r"\bFinal\b", p.game_text):
-                    p.locked = True
+                        p.game_state = "in"
+            if re.search(r"\bFinal\b", p.game_text):
+                p.locked, p.game_state = True, "post"
         if from_text:
             self.warnings.append(f"horarios tomados del texto de Yahoo ({from_text} jugadores), hora de {self.cfg.timezone}")
-        missing_time = [p.name for p in players if p.kickoff is None and not p.on_bye and p.slot != "IR"]
+        missing_time = [p for p in players if p.kickoff is None and not p.on_bye and p.slot != "IR"
+                        and p.game_state != "post"]
         if missing_time:
-            self.warnings.append("sin hora de partido para: " + ", ".join(missing_time[:6])
-                                 + " (sin hora no se planean cambios de último minuto para ellos)")
+            sample = missing_time[0]
+            self.warnings.append(
+                "sin hora de partido para: " + ", ".join(p.name for p in missing_time[:6])
+                + " (sin hora no se planean cambios de último minuto). Texto de Yahoo para "
+                + f"{sample.name}: «{sample.raw_text[:120]}»"
+            )
         if self.sleeper:
             try:
                 self._merge_sleeper(players, now)
@@ -365,6 +389,15 @@ class Autopilot:
         week = week or self.week()
         roster = self.load_roster(week)
         self.enrich(roster.players, week)
+        active = [p for p in roster.players if p.slot != "IR"]
+        if active and all(p.locked for p in active):
+            self.attach_actuals(roster)
+            scored = sum(p.actual or 0.0 for p in roster.players if p.is_starter)
+            text = (f"Todos tus partidos de la semana {week} ya empezaron o terminaron: no se puede cambiar nada."
+                    + (f"\nPuntos de tus titulares: {scored:.2f}." if scored else "")
+                    + f"\nPara preparar la semana {week + 1} usa «Próximo rival» y «Waivers».")
+            return RunResult("gameday" if gameday else "lineup", f"Semana {week} cerrada", text,
+                             notify=not gameday, data={"week": week, "roster": roster, "moves": []})
         opt = self.opt_settings()
         before = current_plan(roster.players, roster.slots, opt)
         plan = optimize_lineup(
@@ -463,32 +496,43 @@ class Autopilot:
             if note.owner_team_id or not (owner.startswith("free") or owner.startswith("waiver") or owner == "fa"
                                           or row.availability in ("FA",) or row.availability.startswith("W")):
                 continue  # already on someone's roster
+            if not (row.team or note.positions):
+                continue  # no NFL team: retired / unsigned
             on_waivers = owner.startswith("waiver") or row.availability.startswith("W")
             positions_ = row.positions or note.positions
             pos = positions_[0] if positions_ else ""
+            weekly = projected_weekly(note, week)
+            date = re.search(r"\(([^)]*)\)", note.owner or row.availability)
             out.append(Player(
                 pid=pid, name=row.name or note.name, position=pos, team=row.team,
-                eligible=eligible_slots(positions_, slots), proj=note.weekly.get(week, 0.0),
-                status=row.status or note.status,
-                weekly={w: v for w, v in note.weekly.items() if w >= week},
-                owner=("W " + note.owner.split(" ", 1)[1]) if on_waivers and " " in note.owner else ("W" if on_waivers else "FA"),
+                eligible=eligible_slots(positions_, slots), proj=weekly.get(week, 0.0),
+                status=row.status or note.status, weekly=weekly,
+                owner=(f"W ({date.group(1).strip()})" if date else "W") if on_waivers else "FA",
                 percent_owned=note.percent_owned,
             ))
             out[-1].notes.append(row.add_url)
         return out
 
-    def _weekly_for_roster(self, players: Sequence[Player], week: int) -> None:
+    def _weekly_for_roster(self, players: Sequence[Player], week: int) -> int:
+        """Future-week projections for the roster. Returns the first week still to be played
+        (the current week once most of its games are over counts as played)."""
+        open_now = 0
         for p in players:
             try:
                 note = self.web.playernote(p.pid)
-                p.weekly = {w: v for w, v in note.weekly.items() if w >= week}
+                p.weekly = projected_weekly(note, week)
+                open_now += week in note.projected_weeks
             except YahooSessionExpired:
                 raise
             except Exception:  # noqa: BLE001
                 p.weekly = {}
+        start = week if open_now * 2 >= max(1, len(players)) else week + 1
+        for p in players:
+            p.weekly = {w: v for w, v in p.weekly.items() if w >= start}
             if not p.weekly:  # fall back to this week's projection, flat
-                p.weekly = {w: p.proj for w in horizon(week, self.waiver_settings())}
-            apply_injury_outlook(p, week)
+                p.weekly = {w: p.proj for w in horizon(start, self.waiver_settings())}
+            apply_injury_outlook(p, start, status_is_for_this_game=(start == week))
+        return start
 
     def waivers(self, week: Optional[int] = None) -> RunResult:
         self.warnings = []
@@ -515,7 +559,7 @@ class Autopilot:
         active = [p for p in roster.players if p.slot != "IR"]
         ir_moves = [p for p in active if p.ir_eligible and p.slot == "BN"][: roster.open_ir_spots()]
         waiver_roster = [p for p in active if p not in ir_moves]
-        self._weekly_for_roster(waiver_roster, week)
+        week = self._weekly_for_roster(waiver_roster, week)  # skip a week that is already played
         candidates = self._candidates(week, roster, slots)
         wset = self.waiver_settings()
         repl = replacement_players(candidates, slots, horizon(week, wset), wset)
@@ -575,43 +619,210 @@ class Autopilot:
         me, opp = pair
         roster = self.load_roster(week)
         self.enrich(roster.players, week)
-        plan = current_plan(roster.players, roster.slots, self.opt_settings())
+        self.attach_actuals(roster)
         opp_roster = self.load_roster(week, team_id=opp.team_id)
         self.enrich(opp_roster.players, week)
-        audit = audit_lineup(opp_roster.players, roster.slots)
-        my_sd = lineup_sd(plan.starters())
-        opp_sd = lineup_sd(audit.starters)
-        wp_now = win_probability(plan.ev, my_sd, audit.current, opp_sd)
-        wp_fixed = win_probability(plan.ev, my_sd, audit.optimal, opp_sd)
-        text = rpt.matchup_report(week, me.name or "Tú", opp.name or "Rival", plan.ev, me.projected, opp.projected,
-                                  audit, wp_now, wp_fixed)
+        self.attach_actuals(opp_roster)
+        mine = team_outlook(p for p in roster.players if p.is_starter)
+        theirs = team_outlook(p for p in opp_roster.players if p.is_starter)
+        if not any(started(p) for p in roster.players):  # before kickoff: count swap hedges too
+            plan = current_plan(roster.players, roster.slots, self.opt_settings())
+            mine.mean = plan.ev
+        movable, free_slots = movable_part(opp_roster.players, roster.slots)
+        audit = audit_lineup(movable, free_slots)
+        wp_now = win_probability(mine.mean, mine.sd, theirs.mean, theirs.sd)
+        wp_fixed = win_probability(mine.mean, mine.sd, theirs.mean + audit.fixable, theirs.sd)
+        text = rpt.matchup_report(week, me.name or "Tú", opp.name or "Rival", mine, theirs, audit, wp_now, wp_fixed)
         return RunResult("matchup", f"Semana {week}: {_pct(wp_now)} de ganar", text,
-                         data={"audit": audit, "win_probability": wp_now})
+                         data={"audit": audit, "win_probability": wp_now, "mine": mine, "opp": theirs})
+
+    def preview(self, with_waivers: bool = True, week: Optional[int] = None) -> RunResult:
+        """Scouting report on the next opponent: past scores, week projections slot by
+        slot, win probability, byes, and free agents that raise *that* week's lineup."""
+        self.warnings = []
+        current = self.week()
+        if week is None:
+            now_roster = self.load_roster(current)
+            self.enrich(now_roster.players, current)
+            active = [p for p in now_roster.players if p.slot != "IR"]
+            done = sum(1 for p in active if started(p) or p.locked)
+            week = current + 1 if done * 2 >= max(1, len(active)) else current
+        games = parse.parse_matchups(self.web.league_home(week).html)
+        pair = next(((a, b) if a.team_id == self.cfg.team_id else (b, a)
+                     for a, b in games if self.cfg.team_id in (a.team_id, b.team_id)), None)
+        if pair is None:
+            return RunResult("preview", "Rival no encontrado", f"No encontré tu partido de la semana {week}.", notify=False)
+        me, opp = pair
+
+        history = []
+        for w in range(1, week):
+            try:
+                past = parse.parse_matchups(self.web.league_home(w).html)
+            except YahooSessionExpired:
+                raise
+            except Exception:  # noqa: BLE001
+                continue
+            row = {"week": w, "mine": None, "mine_result": "", "opp": None, "opp_result": ""}
+            for a, b in past:
+                for side, other in ((a, b), (b, a)):
+                    for key, tid in (("mine", me.team_id), ("opp", opp.team_id)):
+                        if side.team_id == tid and side.score:
+                            row[key] = side.score
+                            row[f"{key}_result"] = ("G" if side.score > (other.score or 0)
+                                                    else "P" if side.score < (other.score or 0) else "E")
+            history.append(row)
+        mine_scores = [h["mine"] for h in history if h["mine"]]
+        opp_scores = [h["opp"] for h in history if h["opp"]]
+
+        roster = self.load_roster(week)
+        self.enrich(roster.players, week)
+        opp_roster = self.load_roster(week, team_id=opp.team_id)
+        self.enrich(opp_roster.players, week)
+        plan = optimize_lineup(roster.players, roster.slots, self.opt_settings())
+        opp_pool = [p for p in opp_roster.players if p.slot != "IR"]
+        opp_best = assign(opp_pool, roster.slots, lambda p, s: p.expected + 1e-9)
+        opp_total = sum(p.expected for p in opp_best if p is not None)
+        slots_cmp = []
+        for code in dict.fromkeys(roster.slots):  # same position: best vs best, second vs second
+            mine_s = sorted((a.player for a in plan.assignments if a.slot == code and a.player),
+                            key=lambda p: -p.expected)
+            opp_s = sorted((o for s, o in zip(roster.slots, opp_best) if s == code and o), key=lambda p: -p.expected)
+            for i in range(roster.slots.count(code)):
+                m = mine_s[i] if i < len(mine_s) else None
+                o = opp_s[i] if i < len(opp_s) else None
+                slots_cmp.append({"slot": code, "mine": m, "opp": o,
+                                  "diff": (m.expected if m else 0.0) - (o.expected if o else 0.0)})
+        my_sd = lineup_sd(plan.starters())
+        opp_sd = lineup_sd([p for p in opp_best if p is not None])
+        wp = win_probability(plan.ev, my_sd, opp_total, opp_sd)
+
+        strategy = []
+        gap = plan.ev - opp_total
+        weak = sorted((r for r in slots_cmp if r["diff"] < -1.0), key=lambda r: r["diff"])
+        if opp_scores and len(opp_scores) >= 2:
+            avg = sum(opp_scores) / len(opp_scores)
+            strategy.append(f"El rival promedia {avg:.1f} pts en {len(opp_scores)} semanas; tu mejor alineación "
+                            f"proyecta {plan.ev:.1f} ({plan.ev - avg:+.1f} contra su promedio).")
+        if wp < 0.45:
+            strategy.append(f"Llegas {abs(gap):.1f} pts abajo. Entre dos jugadores parecidos elige el de más techo "
+                            "(el que puede hacer 25+), no el más seguro: necesitas una semana por encima de tu promedio.")
+        elif wp > 0.55:
+            strategy.append(f"Llegas {gap:.1f} pts arriba. Entre dos jugadores parecidos elige el más seguro "
+                            "(más balones garantizados): no te hace falta arriesgar.")
+        else:
+            strategy.append("Partido parejo: cada punto de banca cuenta. Revisa inactivos el domingo antes de las 11:30 am (Este).")
+        if weak:
+            strategy.append("Donde él es más fuerte: " + ", ".join(f"{r['slot']} ({r['diff']:+.1f})" for r in weak[:3])
+                            + ". Ahí es donde un agente libre te acerca más.")
+        risky = [p for p in plan.starters() if 0 < p.prob < 1]
+        if risky:
+            strategy.append("Dudosos en tu alineación: " + ", ".join(f"{p.name} ({p.status}, {_pct(p.prob)})" for p in risky)
+                            + ". Ten listo un suplente que juegue igual o más tarde.")
+
+        targets = []
+        if with_waivers:
+            pool = [p for p in roster.players if p.slot != "IR"]
+            base = best_total(pool, roster.slots, lambda p: p.expected)
+            for c in self._candidates(week, roster, roster.slots):
+                val = c.weekly.get(week, 0.0)
+                gain = best_total(pool + [c], roster.slots,
+                                  lambda p, c=c, val=val: val if p.pid == c.pid else p.expected) - base
+                if gain > 0.5:
+                    ros = sum(c.weekly.values()) / max(1, len(c.weekly))
+                    targets.append({"name": c.name, "pos": c.position, "avail": c.owner, "proj": val,
+                                    "gain": gain, "ros": ros})
+            targets.sort(key=lambda t: -t["gain"])
+            targets = targets[:6]
+
+        pv = {
+            "week": week, "my_name": me.name or "Tú", "opp_name": opp.name or "Rival", "history": history,
+            "my_avg": sum(mine_scores) / len(mine_scores) if mine_scores else None,
+            "opp_avg": sum(opp_scores) / len(opp_scores) if opp_scores else None,
+            "my_total": plan.ev, "opp_total": opp_total, "win_probability": wp, "slots": slots_cmp,
+            "my_byes": [p.name for p in roster.players if p.on_bye and p.slot != "IR"],
+            "opp_byes": [p.name for p in opp_roster.players if p.on_bye and p.slot != "IR"],
+            "strategy": strategy, "targets": targets,
+        }
+        text = rpt.preview_report(pv)
+        if self.warnings:
+            text += "\nAvisos:\n" + "\n".join(f"  ⚠ {w}" for w in self.warnings)
+        return RunResult("preview", f"Semana {week} vs {pv['opp_name']}: {_pct(wp)} de ganar", text, data=pv)
+
+    def attach_actuals(self, roster: Roster) -> None:
+        """Real points for players whose game started (the lineup page shows projections)."""
+        if not any(started(p) or (p.locked and p.kickoff is None) for p in roster.players):
+            return
+        try:
+            points = self.web.team_points(team_id=roster.team_id, week=roster.week)
+        except YahooSessionExpired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.warnings.append(f"no pude leer los puntos reales: {exc}")
+            return
+        for p in roster.players:
+            if p.pid not in points:
+                continue
+            if not p.game_state and p.locked:
+                p.game_state = "in"  # locked but no schedule: treat as under way
+            if started(p):
+                p.actual = points[p.pid]
 
     def trade(self, give: Sequence[str], get: Sequence[str], week: Optional[int] = None) -> RunResult:
         self.warnings = []
         week = week or self.week()
         roster = self.load_roster(week)
+        self.enrich(roster.players, week)
         active = [p for p in roster.players if p.slot != "IR"]
-        self._weekly_for_roster(active, week)
         give_players = [p for p in active if p.pid in self.resolve(give, active)]
         if len(give_players) != len(give):
             missing = set(give) - {p.name for p in give_players}
             return RunResult("trade", "Trade: jugador no encontrado", f"No están en tu roster: {missing}", notify=False)
-        get_players = []
+        start = self._weekly_for_roster(active, week)
+        get_players, free = [], []
         for name in get:
-            sp = self.sleeper.match(name=name) if self.sleeper else None
-            yid = str(sp.get("yahoo_id") or "") if sp else ""
-            if not yid:
-                return RunResult("trade", "Trade: jugador no encontrado", f"No encontré el id de Yahoo de {name}.", notify=False)
-            note = self.web.playernote(yid)
-            positions = note.positions or [sp.get("position", "")]
-            get_players.append(Player(pid=yid, name=note.name or name, position=positions[0], team=sp.get("team") or "",
-                                      eligible=eligible_slots(positions, roster.slots),
-                                      weekly={w: v for w, v in note.weekly.items() if w >= week}))
-        rep = evaluate_trade(active, give_players, get_players, roster.slots, week,
+            found = self.find_player(name, start, roster.slots)
+            if found is None:
+                return RunResult("trade", "Trade: jugador no encontrado",
+                                 f"No encontré a «{name}» en Yahoo. Escríbelo como aparece en Yahoo.", notify=False)
+            get_players.append(found)
+            if re.match(r"(free agent|waivers?\b|fa$|w \()", found.owner.strip().lower()):
+                free.append(found.name)
+        rep = evaluate_trade(active, give_players, get_players, roster.slots, start,
                              len(roster.slots) + roster.bench_size, self.waiver_settings())
-        return RunResult("trade", rep.verdict.split(":")[0], rpt.trade_report(rep), notify=False, data={"trade": rep})
+        text = rpt.trade_report(rep)
+        if free:
+            text = (f"Ojo: {', '.join(free)} no tiene dueño ({'agente libre / waivers'}). No se consigue con un "
+                    "trade: se agrega en waivers (celda 6). Abajo va el cálculo como si lo agregaras.\n\n" + text)
+        return RunResult("trade", rep.verdict.split(":")[0], text, notify=False, data={"trade": rep})
+
+    def find_player(self, name: str, week: int, slots: Sequence[str]) -> Optional[Player]:
+        """Any NFL player by name: Yahoo's own search first, then Sleeper's id map."""
+        key = norm_name(name)
+        hit = None
+        try:
+            hits = self.web.search_players(name)
+            hit = next((h for h in hits if norm_name(h.name) == key), hits[0] if len(hits) == 1 else None)
+        except YahooSessionExpired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.warnings.append(f"búsqueda en Yahoo falló: {exc}")
+        pid = hit.pid if hit else ""
+        sp = None
+        if not pid and self.sleeper:
+            try:
+                sp = self.sleeper.match(name=name)
+            except Exception:  # noqa: BLE001
+                sp = None
+            pid = str((sp or {}).get("yahoo_id") or "")
+        if not pid:
+            return None
+        note = self.web.playernote(pid)
+        positions = note.positions or (hit.positions if hit else []) or [(sp or {}).get("position", "")]
+        return Player(
+            pid=pid, name=note.name or (hit.name if hit else name), position=positions[0] if positions else "",
+            team=(hit.team if hit else norm_team((sp or {}).get("team"))), eligible=eligible_slots(positions, slots),
+            weekly=projected_weekly(note, week), owner=note.owner,
+        )
 
     # --------------------------------------------------------- delivery
     def deliver(self, result: RunResult, dedupe: bool = True) -> RunResult:
@@ -665,17 +876,28 @@ def kickoff_from_text(text: str, now: datetime, tz: ZoneInfo) -> Optional[dateti
     return datetime(date.year, date.month, date.day, hour, minute, tzinfo=tz).astimezone(timezone.utc)
 
 
-def apply_injury_outlook(p: Player, week: int) -> None:
+def projected_weekly(note: parse.PlayerNote, week: int) -> dict[int, float]:
+    """Only Yahoo's projections (weeks marked with *), never points already scored."""
+    return {w: v for w, v in note.weekly.items() if w >= week and w in note.projected_weeks}
+
+
+def apply_injury_outlook(p: Player, week: int, status_is_for_this_game: bool = True) -> None:
     """Yahoo's future-week projections assume everyone is healthy. Discount the
     next weeks for injured players: IR-type out 4 weeks, Out/Doubtful half next
-    week, and this week times the chance of playing."""
+    week, and this week times the chance of playing.
+
+    When `week` is the week *after* the game the status was given for (waivers
+    run on Monday/Tuesday), Out/Doubtful count half in `week` instead of zero."""
     if not p.weekly:
         return
     if p.status in ("IR", "PUP", "NFI", "SUSP"):
         factors = {week + i: 0.0 for i in range(4)}
     elif p.status in ("O", "NA", "D"):
-        factors = {week: p.prob if p.status == "D" else 0.0, week + 1: 0.5}
-    elif p.status == "Q":
+        if status_is_for_this_game:
+            factors = {week: p.prob if p.status == "D" else 0.0, week + 1: 0.5}
+        else:
+            factors = {week: 0.5}
+    elif p.status == "Q" and status_is_for_this_game:
         factors = {week: p.prob}
     else:
         factors = {}

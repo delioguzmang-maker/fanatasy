@@ -30,6 +30,7 @@ class MockYahoo:
         self.claims: list[dict] = []
         self.posts: list[dict] = []
         self.gets: list[str] = []
+        self.first_projected = 3  # playernote: weeks before this show points already scored
         # weekly projections served by /playernote: roster players get a flat line
         # equal to their team-page projection; free agents are defined here.
         self.proj = {}
@@ -104,7 +105,8 @@ class MockYahoo:
         owner_html = (f'<a href="/f1/{LEAGUE}/{TEAM if pid in self.proj else 4}">{owner}</a>'
                       if owner not in ("Free Agent",) and not owner.startswith("Waivers") else owner)
         rows = "".join(
-            f"<tr><td>{w}</td><td>vs X</td><td>{'*' if w >= 3 else ''}{v:.2f}</td></tr>" for w, v in sorted(weekly.items())
+            f"<tr><td>{w}</td><td>vs X</td><td>{'*' if w >= self.first_projected else ''}{v:.2f}</td></tr>"
+            for w, v in sorted(weekly.items())
         )
         html = (f'<div class="playerinfo"><div class="name">{name}</div><dl><dd class="pos">{pos},</dd>'
                 f'<dd class="owner">{owner_html},</dd><dd class="owned">10% owned</dd></dl></div>'
