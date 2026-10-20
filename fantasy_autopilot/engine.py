@@ -22,9 +22,19 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from . import calibration
 from . import report as rpt
+from . import role as role_mod
 from .config import Config
-from .matchup import audit_lineup, lineup_sd, movable_part, started, team_outlook, win_probability
+from .matchup import (
+    audit_lineup,
+    lineup_sd,
+    movable_part,
+    started,
+    team_outlook,
+    win_prob_swap,
+    win_probability,
+)
 from .models import Game, Player, Roster, WriteResult
 from .nfl import eligible_slots, norm_name, norm_team
 from .notify import Notifier
@@ -89,6 +99,33 @@ class State:
         self.data.setdefault("sent", {})[key] = digest
         self.save()
         return False
+
+    def should_send(self, key: str, text: str, urgent: bool, now: float,
+                    resend_minutes: int = 30, max_resends: int = 4) -> tuple[bool, int]:
+        """(send?, how many times it was already sent). New text: send. Same urgent text
+        nobody acted on: send again every `resend_minutes`, at most `max_resends` times."""
+        digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+        rec = self.data.setdefault("alerts", {}).get(key)
+        if not rec or rec.get("digest") != digest:
+            self.data["alerts"][key] = {"digest": digest, "t": now, "n": 1}
+            self.save()
+            return True, 0
+        if urgent and rec.get("n", 1) <= max_resends and now - rec.get("t", 0) >= resend_minutes * 60:
+            rec["t"], rec["n"] = now, rec.get("n", 1) + 1
+            self.save()
+            return True, rec["n"] - 1
+        return False, rec.get("n", 1)
+
+    def cached_note(self, pid: str, now: float, ttl: float = 600) -> Optional[str]:
+        rec = self.data.get("notes", {}).get(pid)
+        return rec[1] if rec and now - rec[0] < ttl else None
+
+    def put_note(self, pid: str, text: str, now: float) -> None:
+        notes = self.data.setdefault("notes", {})
+        notes[pid] = [now, text[:4000]]
+        for k in [k for k, v in notes.items() if now - v[0] > 86400]:
+            notes.pop(k, None)
+        self.save()
 
     def claimed(self, week: int) -> set[str]:
         return set(self.data.get("claims", {}).get(str(week), []))
@@ -398,6 +435,21 @@ class Autopilot:
                     + f"\nPara preparar la semana {week + 1} usa «Próximo rival» y «Waivers».")
             return RunResult("gameday" if gameday else "lineup", f"Semana {week} cerrada", text,
                              notify=not gameday, data={"week": week, "roster": roster, "moves": []})
+        if self.cfg.log_status:
+            try:
+                calibration.log_statuses(self.cfg.state_path / "estado_log.csv", week, roster.players, self.now_fn())
+            except OSError as exc:
+                self.warnings.append(f"no pude guardar estado_log.csv: {exc}")
+        role_alerts: list[role_mod.RoleAlert] = []
+        role_good: list[str] = []
+        role_applied = False
+        if self.cfg.role_check:
+            role_alerts, role_good = self.role_alerts(roster)
+            if role_alerts and self.cfg.role_auto_swap and self.cfg.writes_enabled:
+                by_pid = roster.by_pid()
+                for a in role_alerts:
+                    by_pid[a.player_pid].proj = round(by_pid[a.player_pid].proj * a.factor, 2)
+                role_applied = True
         opt = self.opt_settings()
         before = current_plan(roster.players, roster.slots, opt)
         plan = optimize_lineup(
@@ -405,6 +457,9 @@ class Autopilot:
             pins_start=self.resolve(self.cfg.pins_start, roster.players),
             pins_bench=self.resolve(self.cfg.pins_bench, roster.players),
         )
+        role_line, role_gain, role_out = "", 0.0, ""
+        if role_alerts and not role_applied:
+            role_line, role_gain, role_out = self._role_replan(roster, plan, role_alerts, opt)
         moves = plan_moves(roster.players, plan)
         obj_before, _ = plan_objective(before, opt)
         obj_after, _ = plan_objective(plan, opt)
@@ -424,19 +479,213 @@ class Autopilot:
             week, self.cfg.mode, roster.players, before, plan, moves, obj_before, obj_after,
             decided, threshold, writes, opt, self.tz, self.warnings, self.team_url,
         )
+        extra: list[str] = []
+        if role_alerts:
+            extra.append("ALERTA DE ROL (titular activo que puede no jugar mucho):")
+            extra += [f"  ⚠ {a.describe(with_swap=False)}" for a in role_alerts]
+            if role_line:
+                extra.append(f"  → {role_line}")
+            if role_applied:
+                extra.append("  (modo automático con role_auto_swap: la alineación de arriba ya lo cuenta)")
+            else:
+                extra.append("  Las palabras clave pueden dar falsas alarmas: lee la noticia y cambia tú en Yahoo.")
+        if role_good:
+            extra += ["  ✓ " + g for g in role_good]
+        holes = [a.slot for a in plan.assignments if a.player is None or (a.player.prob == 0 and not a.player.locked)]
+        rescue: list[str] = []
+        if holes and self.cfg.fa_rescue:
+            rescue = self.fa_rescue(week, roster, holes)
+            if rescue:
+                extra.append("PUESTO SIN REEMPLAZO EN TU BANCA: agente libre que juega más tarde:")
+                extra += [f"  → {r}" for r in rescue]
+        wswap = None
+        if not gameday and self.cfg.win_prob_lineup:
+            wswap = self.win_prob_advice(week, roster, plan)
+            if wswap is not None:
+                extra.append("PARA GANAR, NO SOLO SUMAR PUNTOS:")
+                extra.append(f"  → {wswap.describe()}")
+        if extra:
+            text += "\n" + "\n".join(extra)
         failed = any(not w.ok for w in writes)
-        urgent = failed or bool(stuck) or (gameday and decided and self.cfg.mode == "sugerir")
+        role_urgent = role_gain > 0.01 and not role_applied
+        urgent = (failed or bool(stuck) or (gameday and decided and self.cfg.mode == "sugerir")
+                  or role_urgent or bool(rescue))
         if gameday:
             title = ("⚠ Cambia tu alineación YA" if decided and self.cfg.mode == "sugerir"
                      else "Alineación ajustada antes del partido" if decided else "Alineación: sin cambios")
         else:
             title = f"Alineación semana {week}: " + (f"{len(moves)} cambio(s) {plan.naive - before.naive:+.2f}" if decided else "sin cambios")
+        if role_urgent:
+            title = f"⚠ Alerta de rol: saca a {role_out} ({role_gain:+.2f})"
         if stuck:
             title = "⚠ Titular fuera y sin reemplazo disponible"
-        notify = (not gameday) or decided or bool(stuck) or failed
+        if rescue:
+            title = "⚠ Puesto vacío: agrega un agente libre"
+        notify = (not gameday) or decided or bool(stuck) or failed or role_urgent or bool(rescue)
         return RunResult("gameday" if gameday else "lineup", title, text, changed=decided, urgent=urgent,
                          notify=notify, writes=writes,
-                         data={"week": week, "roster": roster, "plan": plan, "before": before, "moves": moves})
+                         data={"week": week, "roster": roster, "plan": plan, "before": before, "moves": moves,
+                               "role_alerts": role_alerts, "rescue": rescue, "win_swap": wswap})
+
+    # ------------------------------------------------------- lineup helpers
+    def note_text(self, pid: str) -> str:
+        now = time.time()
+        cached = self.state.cached_note(pid, now)
+        if cached is not None:
+            return cached
+        page = self.web.get("/playernote", {"pid": pid})
+        text = role_mod.note_text(page.html)
+        self.state.put_note(pid, text, now)
+        return text
+
+    def role_alerts(self, roster: Roster) -> tuple[list[role_mod.RoleAlert], list[str]]:
+        try:
+            alerts, good, failures = role_mod.check_roster(
+                roster.players, self.note_text, self.now_fn(), self.tz,
+                penalty=self.cfg.role_penalty, penalty_undated=self.cfg.role_penalty_undated,
+                max_age_hours=self.cfg.role_news_hours, with_swap=False,
+            )
+        except YahooSessionExpired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.warnings.append(f"alerta de rol no se pudo revisar: {exc}")
+            return [], []
+        if failures:
+            self.warnings.append("sin noticias (alerta de rol) de: " + ", ".join(failures[:5]))
+        return alerts, good
+
+    def _role_replan(self, roster: Roster, plan: Any, alerts: Sequence[role_mod.RoleAlert],
+                     opt: OptimizerSettings) -> tuple[str, float, str]:
+        """Best lineup if the alerted starters are counted with their penalty, compared
+        with the normal plan (both valued with the penalty). Projections are restored."""
+        by_pid = roster.by_pid()
+        saved = {}
+        for a in alerts:
+            p = by_pid[a.player_pid]
+            saved[p.pid] = p.proj
+            p.proj = round(p.proj * a.factor, 2)
+        try:
+            alt = optimize_lineup(
+                roster.players, roster.slots, opt,
+                pins_start=self.resolve(self.cfg.pins_start, roster.players),
+                pins_bench=self.resolve(self.cfg.pins_bench, roster.players),
+            )
+            obj_alt, _ = plan_objective(alt, opt)
+            obj_plan, _ = plan_objective(plan, opt)
+        finally:
+            for pid, proj in saved.items():
+                by_pid[pid].proj = proj
+        now_t, alt_t = plan.target_slots(), alt.target_slots()
+        changes = [(by_pid[pid].name, now_t.get(pid, "BN"), slot) for pid, slot in alt_t.items()
+                   if now_t.get(pid, "BN") != slot and pid in by_pid]
+        gain = obj_alt - obj_plan
+        if not changes or gain <= 0.01:
+            return "Aun contándolo con el castigo, sigue en tu mejor alineación: déjalo.", 0.0, ""
+        benched = [n for n, a, b in changes if b == "BN"]
+        moves = ", ".join(f"{n} {a}→{b}" for n, a, b in sorted(changes, key=lambda c: c[2] != "BN"))
+        line = (f"Contando la alerta, la mejor alineación cambia: {moves}. "
+                f"{obj_alt:.2f} - {obj_plan:.2f} = {gain:+.2f} (con el castigo de rol).")
+        return line, gain, ", ".join(benched) or changes[0][0]
+
+    def _sd_of(self, p: Player) -> Optional[float]:
+        sd = self.cfg.player_sd
+        val = sd.get(p.pid, sd.get(norm_name(p.name)))
+        return float(val) if val is not None else None
+
+    def win_prob_advice(self, week: int, roster: Roster, plan: Any) -> Any:
+        """Load this week's opponent and look for a swap that raises the chance to win."""
+        try:
+            html = self.league_home() if not self.cfg.week else self.web.league_home(week).html
+            pair = next(((a, b) if a.team_id == self.cfg.team_id else (b, a)
+                         for a, b in parse.parse_matchups(html) if self.cfg.team_id in (a.team_id, b.team_id)), None)
+            if pair is None:
+                return None
+            opp = self.load_roster(week, team_id=pair[1].team_id)
+            self.enrich(opp.players, week)
+            self.attach_actuals(opp)
+        except YahooSessionExpired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.warnings.append(f"sin rival para la probabilidad de ganar: {exc}")
+            return None
+        if self.cfg.log_status:
+            try:  # rival players' pre-game status too: more cases to calibrate "Questionable"
+                calibration.log_statuses(self.cfg.state_path / "estado_log.csv", week, opp.players, self.now_fn())
+            except OSError:
+                pass
+        theirs = team_outlook(p for p in opp.players if p.is_starter)
+        bench = [p for p in roster.players if p.slot != "IR" and p.pid not in {x.pid for x in plan.starters()}]
+        return win_prob_swap(plan.assignments, bench, plan.ev, theirs.mean, theirs.sd,
+                             sd_of=self._sd_of, max_sacrifice=self.cfg.max_sacrifice)
+
+    def fa_rescue(self, week: int, roster: Roster, holes: Sequence[str]) -> list[str]:
+        """A starter is out and nobody on the bench can replace him: best free agent
+        (no waiver wait) whose game has not started, and who to drop."""
+        now = self.now_fn()
+        games = self.games(week)
+        out, used = [], set()
+        bench = [p for p in roster.players if p.slot == "BN" and not p.locked
+                 and not role_mod_protected(p, self.cfg.never_drop)]
+        open_spot = roster.open_bench_spots() > 0
+        drop_value: dict[str, float] = {}
+        for slot in dict.fromkeys(holes):
+            positions = [pos for pos in ("QB", "RB", "WR", "TE", "K", "DEF") if slot in eligible_slots([pos], roster.slots)]
+            best = None
+            for pos in positions:
+                try:
+                    rows = self.web.players(pos, status="A")
+                except YahooSessionExpired:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self.warnings.append(f"no pude leer libres {pos}: {exc}")
+                    continue
+                for r in rows[:6]:
+                    if r.positions and pos not in r.positions:
+                        continue
+                    if r.pid in used or not r.availability.upper().startswith("FA") or is_out(r.status) or r.status == "D":
+                        continue
+                    g = games.get(norm_team(r.team))
+                    if g is None or g.kickoff <= now:
+                        continue  # bye, unknown, or already started
+                    try:
+                        note = self.web.playernote(r.pid)
+                    except YahooSessionExpired:
+                        raise
+                    except Exception:  # noqa: BLE001
+                        continue
+                    proj = projected_weekly(note, week).get(week, 0.0)
+                    if best is None or proj > best[1]:
+                        best = (r, proj, pos)
+            if best is None:
+                out.append(f"{slot}: no encontré un agente libre que juegue más tarde. Revisa Yahoo > Players.")
+                continue
+            r, proj, pos = best
+            used.add(r.pid)
+            if open_spot:
+                drop_txt = "tienes espacio libre en la banca, no sueltas a nadie"
+                open_spot = False
+            else:
+                for b in bench:
+                    if b.pid not in drop_value:
+                        try:
+                            weekly = projected_weekly(self.web.playernote(b.pid), week)
+                        except YahooSessionExpired:
+                            raise
+                        except Exception:  # noqa: BLE001
+                            weekly = {}
+                        drop_value[b.pid] = sum(weekly.values()) if weekly else b.proj
+                choices = [b for b in bench if b.pid not in used]
+                victim = min(choices, key=lambda b: drop_value.get(b.pid, 0.0), default=None)
+                if victim is None:
+                    drop_txt = "no hay a quién soltar sin perder un titular: decide tú"
+                else:
+                    used.add(victim.pid)
+                    drop_txt = (f"suelta a {victim.name} (le quedan {drop_value.get(victim.pid, 0.0):.1f} pts "
+                                "proyectados en toda la temporada, el menor de tu banca)")
+            out.append(f"{slot}: agrega a {r.name} ({pos}, {r.team}, agente libre, sin espera) que proyecta "
+                       f"{proj:.2f}: {proj:.2f} - 0.00 = +{proj:.2f}; {drop_txt}. "
+                       "Verifica en Yahoo > Players que siga libre.")
+        return out
 
     def gameday(self, window_minutes: int = 120, force: bool = False) -> RunResult:
         """Cheap check first (ESPN only): is any game starting soon? Then the full lineup pass."""
@@ -468,7 +717,8 @@ class Autopilot:
             except Exception as exc:  # noqa: BLE001
                 self.warnings.append(f"no pude leer agentes libres {pos}: {exc}")
                 continue
-            for r in rows[: self.cfg.candidates_per_position]:
+            limit = self.cfg.candidates_kdef if pos in ("K", "DEF") else self.cfg.candidates_per_position
+            for r in rows[:limit]:
                 listed.setdefault(r.pid, r)
         mine = {p.pid for p in roster.players}
         if self.sleeper and self.cfg.use_trending:
@@ -511,7 +761,17 @@ class Autopilot:
                 percent_owned=note.percent_owned,
             ))
             out[-1].notes.append(row.add_url)
+        # free agents get the same injury discount as your own players (Out = 0 this week, etc.)
+        probs = dict(DEFAULT_PROBS)
+        probs.update(self.cfg.status_probs)
+        apply_status_model(out, self.cfg.p_play_overrides, probs)
+        for c in out:
+            apply_injury_outlook(c, week, status_is_for_this_game=True)
+            c.proj = c.weekly.get(week, 0.0)
+            c.p_play = None  # the discount is already inside weekly/proj: never count it twice
         return out
+
+    _CANDIDATES_INJURY = True  # notebook cell 3b checks this to avoid a second discount
 
     def _weekly_for_roster(self, players: Sequence[Player], week: int) -> int:
         """Future-week projections for the roster. Returns the first week still to be played
@@ -563,8 +823,6 @@ class Autopilot:
         candidates = self._candidates(week, roster, slots)
         wset = self.waiver_settings()
         repl = replacement_players(candidates, slots, horizon(week, wset), wset)
-        claims = plan_claims(waiver_roster, candidates, slots, week, roster_limit, balance, wset,
-                             rival_max_balance=rival_max, replacements=repl)
         history: list[int] = []
         try:
             history = [t.amount for t in self.web.transactions()]
@@ -572,6 +830,9 @@ class Autopilot:
             raise
         except Exception:  # noqa: BLE001
             pass
+        claims = plan_claims(waiver_roster, candidates, slots, week, roster_limit, balance, wset,
+                             rival_max_balance=rival_max, replacements=repl,
+                             league_bids=history if self.cfg.bid_history_cap else ())
         writes = []
         if claims and (self.cfg.rehearsal or (self.cfg.writes_enabled and self.cfg.auto_claims)):
             browser = self.browser()
@@ -828,9 +1089,15 @@ class Autopilot:
     def deliver(self, result: RunResult, dedupe: bool = True) -> RunResult:
         if not result.notify or not self.notifier.enabled:
             return result
-        if dedupe and result.task == "gameday" and self.state.seen("gameday", result.text):
-            return result
-        errors = self.notifier.send(result.title, result.text, urgent=result.urgent, click_url=self.team_url)
+        title = result.title
+        if dedupe and result.task == "gameday":
+            send, times = self.state.should_send("gameday", result.text, result.urgent, time.time(),
+                                                 self.cfg.resend_minutes, self.cfg.max_resends)
+            if not send:
+                return result
+            if times:
+                title = f"RECORDATORIO {times}: {title}"
+        errors = self.notifier.send(title, result.text, urgent=result.urgent, click_url=self.team_url)
         if errors:
             print("Avisos de notificación:", "; ".join(errors))
         return result
@@ -853,6 +1120,11 @@ class Autopilot:
             stamp = datetime.now(self.tz).strftime("%H:%M")
             print(f"[{stamp}] {result.title}")
             time.sleep(every_minutes * 60)
+
+
+def role_mod_protected(p: Player, never_drop: Sequence[str]) -> bool:
+    keys = {norm_name(x) for x in never_drop} | set(never_drop)
+    return p.pid in keys or norm_name(p.name) in keys
 
 
 def _pct(x: float) -> str:

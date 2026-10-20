@@ -35,6 +35,9 @@ class WaiverSettings:
     max_pct: float = 0.5
     min_bid: int = 0
     avoid_round: bool = True
+    odd_bids: bool = True             # odd amounts: fewer ties (this league breaks ties by rank)
+    history_cap: bool = True          # cap at the league's 90th-percentile winning bid + 1 ...
+    star_ppw: float = 4.0             # ... unless the player adds this many lineup points per week
     min_gain: float = 8.0            # discounted lineup points needed to bother (~1 pt/week)
     max_bid_kdef: int = 2             # kickers and defenses are streamable: never pay more
     protect_starters: bool = True     # never drop someone in this week's best lineup
@@ -133,6 +136,7 @@ def suggest_bid(
     rival_max_balance: Optional[int] = None,
     on_waivers: bool = True,
     position: str = "",
+    league_bids: Sequence[int] = (),
 ) -> tuple[int, str]:
     """FAAB bid for a claim worth `gain` discounted lineup points."""
     if not on_waivers:
@@ -152,13 +156,33 @@ def suggest_bid(
     if bid > cap:
         bid = cap
         reason += f"; tope {settings.max_pct:.0%} del saldo = ${cap}"
+    limit = min(balance, max(cap, 1))
+    paid = sorted(b for b in league_bids if b and b > 0)
+    per_week = gain / eff_weeks
+    if settings.history_cap and len(paid) >= 5:
+        p90 = paid[min(len(paid) - 1, int(0.9 * len(paid)))]
+        if per_week < settings.star_ppw and bid > p90 + 1:
+            bid = p90 + 1
+            reason += (f"; tope ${bid}: en esta liga 9 de cada 10 pujas ganadoras fueron de ${p90} o menos "
+                       f"({len(paid)} pujas) y este jugador suma {per_week:.1f} pts/semana (< {settings.star_ppw:g})")
+        elif per_week >= settings.star_ppw:
+            reason += f"; sin tope de la liga: suma {per_week:.1f} pts/semana (jugador clave)"
     if position in ("K", "DEF") and bid > settings.max_bid_kdef:
         bid = settings.max_bid_kdef
         reason += f"; tope ${bid} para {position} (se consiguen gratis casi cada semana)"
+    if position in ("K", "DEF"):
+        limit = min(limit, settings.max_bid_kdef)
     bid = max(settings.min_bid, min(bid, balance))
-    if settings.avoid_round and bid >= 5 and bid % 5 == 0 and bid + 1 <= min(balance, max(cap, 1)):
+    if settings.avoid_round and bid >= 5 and bid % 5 == 0 and bid + 1 <= limit:
         bid += 1
         reason += "; +$1 para no empatar con pujas redondas"
+    if settings.odd_bids and bid >= 2 and bid % 2 == 0:
+        if bid + 1 <= limit:
+            bid += 1
+            reason += "; +$1 para que sea impar (menos empates)"
+        else:
+            bid -= 1
+            reason += "; -$1 para que sea impar sin pasar el tope"
     return bid, reason
 
 
@@ -172,6 +196,7 @@ def plan_claims(
     settings: Optional[WaiverSettings] = None,
     rival_max_balance: Optional[int] = None,
     replacements: Optional[Sequence[Player]] = None,
+    league_bids: Sequence[int] = (),
 ) -> list[ClaimPlan]:
     """Best add/drop moves, each valued on the roster that results from the previous ones.
 
@@ -215,7 +240,8 @@ def plan_claims(
             break
         gain, cand, drop, by_week = best
         on_waivers = cand.owner.upper().startswith("W")
-        bid, reason = suggest_bid(gain, weeks, budget, settings, rival_max_balance, on_waivers, cand.position)
+        bid, reason = suggest_bid(gain, weeks, budget, settings, rival_max_balance, on_waivers, cand.position,
+                                  league_bids)
         claims.append(ClaimPlan(cand, drop, gain, by_week, bid, reason, on_waivers,
                                 next_weeks=[_weekly(cand, w) for w in weeks[:4]]))
         current = [p for p in current if drop is None or p.pid != drop.pid] + [cand]

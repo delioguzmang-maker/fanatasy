@@ -87,6 +87,24 @@ Notas:
 - El repo es público: los registros solo muestran el título de cada corrida.
 - GitHub corre los horarios desde la rama principal del repo, y puede atrasarlos unos minutos.
 
+## Arreglos de la auditoría del 20 de octubre
+
+| Problema | Arreglo | Dónde |
+|---|---|---|
+| Un titular **activo** que perdió el puesto (Skattebo, semana 6) no se detectaba | Alerta de rol: lee la nota de Yahoo, usa solo noticias recientes (por fecha), recalcula la alineación contándolo × 0.5 y manda alerta urgente | `role.py`, `lineup()`, celdas 4b y 8 |
+| Palabras de lesión contadas dos veces (estado + alerta) | La alerta de rol solo usa palabras de **rol**; las de lesión las cuenta el estado | `role.py` |
+| Una alerta urgente sin atender se mandaba una sola vez | Se repite cada 30 min (máx. 4) mientras siga igual | `State.should_send` |
+| Titular fuera sin suplente en la banca | Sugiere el mejor agente libre (sin espera) que juega más tarde y a quién soltar | `fa_rescue()` |
+| Elegir solo por puntos aunque vayas abajo | Busca un cambio que suba tu probabilidad de ganar cediendo ≤ 1.5 pts | `win_prob_swap`, celda 7d llena `player_sd` |
+| ¿Doble descuento de "Questionable"? | Se guarda el estado antes de cada partido (`estado_log.csv`) y la celda 7d mide el factor real con 30+ casos | `calibration.py` |
+| Pujas sin relación con lo que paga la liga | Tope = 90.º percentil de pujas ganadoras + 1, salvo jugadores clave (≥ 4 pts/semana); siempre impares | `suggest_bid` |
+| Libres lesionados valorados como sanos | Mismo descuento de lesión que tus jugadores (dentro del paquete) | `_candidates()` |
+| Acción de Gracias, Black Friday y Navidad sin revisión de inactivos | Horarios extra en el workflow | `autopilot.yml` |
+
+Opciones nuevas en `Config`: `role_check`, `role_penalty`, `role_penalty_undated`, `role_news_hours`,
+`role_auto_swap`, `resend_minutes`, `max_resends`, `win_prob_lineup`, `max_sacrifice`, `player_sd`,
+`fa_rescue`, `log_status`, `bid_history_cap`, `candidates_kdef`.
+
 ## Línea de comandos
 
 ```bash

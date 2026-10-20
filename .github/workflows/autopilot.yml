@@ -15,6 +15,13 @@ on:
     - cron: "*/15 0,1 * * 1"     # Sunday night game
     - cron: "*/15 22,23 * * 1"   # Monday night game
     - cron: "*/15 0,1 * * 2"
+    # Holiday games (every year; a date with no game just ends in "Sin partidos próximos").
+    # After early November Eastern = UTC-5: 12:30 pm ET = 17:30 UTC, 8:20 pm ET = 01:20 UTC.
+    - cron: "*/15 15-23 26 11 *"  # Thanksgiving 2026 (Thursday Nov 26): three games, from ~12:30 pm ET
+    - cron: "*/15 0,1 27 11 *"    #   ...its night game
+    - cron: "*/15 17-21 27 11 *"  # Black Friday (Nov 27): afternoon game ~3 pm ET
+    - cron: "*/15 15-23 25 12 *"  # Christmas (Friday Dec 25): day games and night game
+    - cron: "*/15 0,1 26 12 *"
   workflow_dispatch:
     inputs:
       task:

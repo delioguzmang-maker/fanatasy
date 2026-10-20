@@ -49,8 +49,25 @@ class Config:
     never_drop: list[str] = field(default_factory=list)
     last_week: int = 17
     discount: float = 0.92
-    candidates_per_position: int = 8
+    candidates_per_position: int = 12    # RB/WR/TE/QB free agents read per position
+    candidates_kdef: int = 5             # kickers and defenses (streamable, fewer pages)
+    bid_history_cap: bool = True         # cap bids near what this league actually pays
     use_trending: bool = True
+    # role alerts (an active starter who lost his job: the Skattebo case)
+    role_check: bool = True
+    role_penalty: float = 0.5            # projection multiplier with fresh role news
+    role_penalty_undated: float = 0.75   # role news without a readable date
+    role_news_hours: float = 120.0       # older news is ignored
+    role_auto_swap: bool = False         # True: the lineup itself counts the penalty (automatico)
+    # alerts
+    resend_minutes: int = 30             # repeat an urgent game-day alert nobody acted on
+    max_resends: int = 4
+    # win probability, not only points
+    win_prob_lineup: bool = True         # suggest riskier/safer swaps when they raise the chance to win
+    max_sacrifice: float = 1.5           # expected points you may give up for a better chance to win
+    player_sd: dict[str, float] = field(default_factory=dict)  # weekly SD by name or id (cell 7d)
+    fa_rescue: bool = True               # starter out and no backup: suggest a free agent
+    log_status: bool = True              # keep estado_log.csv to calibrate the Questionable discount
     # notifications
     ntfy_topic: str = ""
     ntfy_server: str = "https://ntfy.sh"

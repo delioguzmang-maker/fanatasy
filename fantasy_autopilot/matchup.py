@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 from .models import Player
 from .optimizer import best_total
@@ -103,3 +103,69 @@ def audit_lineup(players: Sequence[Player], slots: Sequence[str]) -> LineupAudit
             w = min(worse, key=_points)
             issues.append(f"{b.name} ({_points(b):.2f}) está en la banca y {w.name} ({_points(w):.2f}) juega")
     return LineupAudit(current=current, optimal=optimal, issues=issues, starters=starters)
+
+
+# --------------------------------------------------------------------------
+# win probability, not only points
+# --------------------------------------------------------------------------
+
+def player_var(p: Player, sd_override: Optional[float] = None) -> float:
+    """Variance of a player's weekly points, counting the chance he does not play."""
+    sd = sd_override if sd_override is not None else CV.get(p.position, 0.6) * max(p.proj, 0.0)
+    q = p.prob
+    # mixture: plays (mean proj, var sd²) with prob q, else 0
+    return q * (sd ** 2 + p.proj ** 2) - (q * p.proj) ** 2
+
+
+@dataclass
+class WinSwap:
+    out_name: str
+    in_name: str
+    slot: str
+    out_pid: str
+    in_pid: str
+    points_cost: float     # expected points given up (positive = fewer points)
+    wp_before: float
+    wp_after: float
+
+    def describe(self) -> str:
+        return (f"Pon a {self.in_name} en {self.slot} en lugar de {self.out_name}: pierdes "
+                f"{self.points_cost:.2f} pts esperados pero tu probabilidad de ganar pasa de "
+                f"{self.wp_before * 100:.0f}% a {self.wp_after * 100:.0f}% "
+                f"({(self.wp_after - self.wp_before) * 100:+.1f} puntos).")
+
+
+def win_prob_swap(
+    assignments: Sequence,            # LineupPlan.assignments (slot, player)
+    bench: Sequence[Player],
+    my_mean: float,
+    opp_mean: float,
+    opp_sd: float,
+    sd_of: Callable[[Player], Optional[float]] = lambda p: None,
+    max_sacrifice: float = 1.5,
+    min_gain: float = 0.01,
+) -> Optional[WinSwap]:
+    """Best single starter/bench swap by win probability.
+
+    Behind: a boom-or-bust player with a similar projection helps (more spread).
+    Ahead: a steady one helps (less spread). Only swaps that give up at most
+    `max_sacrifice` expected points are tried."""
+    starters = [a.player for a in assignments if a.player is not None]
+    var = sum(player_var(p, sd_of(p)) for p in starters)
+    base = win_probability(my_mean, math.sqrt(max(var, 0.0)), opp_mean, opp_sd)
+    best: Optional[WinSwap] = None
+    for a in assignments:
+        p = a.player
+        if p is None or p.locked:
+            continue
+        for b in bench:
+            if b.locked or not b.can_fill(a.slot) or b.prob == 0 or b.on_bye:
+                continue
+            cost = p.expected - b.expected
+            if cost > max_sacrifice:
+                continue
+            v = var - player_var(p, sd_of(p)) + player_var(b, sd_of(b))
+            wp = win_probability(my_mean - cost, math.sqrt(max(v, 0.0)), opp_mean, opp_sd)
+            if wp - base >= min_gain and (best is None or wp > best.wp_after):
+                best = WinSwap(p.name, b.name, a.slot, p.pid, b.pid, cost, base, wp)
+    return best
