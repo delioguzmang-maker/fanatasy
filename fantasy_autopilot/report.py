@@ -115,7 +115,8 @@ def lineup_report(
         lines.append(f"{verb} ({plan.naive - before.naive:+.2f} pts proyectados):")
         lines += move_lines(moves)
     else:
-        lines.append("Tu alineación ya es la óptima. No hay cambios.")
+        lines.append("Tu alineación ya es la de más puntos esperados con estas proyecciones y estos estados de "
+                     "lesión. No hay cambios.")
     lines.append(f"Proyección Yahoo (suma simple): {before.naive:.2f} → {plan.naive:.2f}")
     lines.append(f"Valor esperado con riesgo de inactivos: {before.ev:.2f} → {plan.ev:.2f}")
     lines.append("Alineación recomendada:")
@@ -157,7 +158,8 @@ def claims_report(
     for p in ir_moves:
         lines.append(f"• Mueve a {p.name} al puesto IR: libera un lugar sin soltar a nadie.")
     if not claims:
-        lines.append("No hay ningún jugador disponible que mejore tu alineación lo suficiente. No pujes.")
+        lines.append("Ningún jugador disponible mejora tus titulares lo suficiente para gastar FAAB. No pujes por "
+                     "titulares (mira abajo las mejoras de banca).")
     for i, c in enumerate(claims, 1):
         drop = f"soltar a {c.drop.name}" if c.drop else "sin soltar a nadie (hay espacio)"
         kind = f"puja ${c.bid}" if c.on_waivers else "agente libre: agrégalo ya ($0)"
@@ -249,4 +251,23 @@ def trade_report(rep: TradeReport) -> str:
         "Por semana (+ = mejor para ti): " + ", ".join(f"S{w} {d:+.1f}" for w, d in sorted(rep.per_week.items())),
         f"Veredicto: {rep.verdict}",
     ]
+    return "\n".join(lines)
+
+
+def bench_report(dead, upgrades) -> str:
+    """Dead roster spots and free bench upgrades (depth for byes and injuries)."""
+    if not dead and not upgrades:
+        return ""
+    lines = ["", "MEJORAS DE BANCA (no suben tus titulares de hoy, pero te dan suplentes para descansos y lesiones):"]
+    if dead:
+        lines.append("Lugares muertos en tu roster (no juegan en las próximas 4 semanas ni para cubrir descansos, y "
+                     "soltarlos no te quita puntos): "
+                     + ", ".join(f"{p.name} ({p.position}, {c:.1f} pts)" for p, c in dead[:5]))
+    for u in upgrades:
+        how = "puja $1" if u.on_waivers else "agente libre: $0"
+        lines.append(f"  → Suelta a {u.drop.name} ({u.drop.position}) y agrega a {u.add.name} ({u.add.position}, "
+                     f"{u.add.team}) · {how}. Promedio próximas 4 semanas {u.depth:.2f} (suplente para el FLEX, descansos "
+                     f"y lesiones); con las proyecciones de hoy tu alineación cambia {u.gain:+.1f} pts.")
+    if dead and not upgrades:
+        lines.append("  Ningún corredor, receptor o ala cerrada libre le da más valor a ese lugar ahora mismo.")
     return "\n".join(lines)

@@ -249,3 +249,78 @@ def plan_claims(
         if budget is not None:
             budget -= bid
     return claims
+
+
+@dataclass
+class BenchUpgrade:
+    add: Player
+    drop: Player
+    drop_cost: float               # lineup points lost by dropping him (≈0 = dead roster spot)
+    gain: float                    # lineup points gained over the season with the swap (byes, injuries)
+    depth: float                   # the new player's average projection next 4 weeks
+    on_waivers: bool
+
+
+def bench_upgrades(
+    roster: Sequence[Player],
+    candidates: Iterable[Player],
+    slots: Sequence[str],
+    start_week: int,
+    settings: Optional[WaiverSettings] = None,
+    replacements: Sequence[Player] = (),
+    exclude: Iterable[str] = (),
+    dead_below: float = 0.5,
+    margin: float = 1.0,
+    limit: int = 3,
+) -> tuple[list[tuple[Player, float]], list[BenchUpgrade]]:
+    """Dead roster spots and the free agents who would fill them better.
+
+    A dead spot is a player who (1) would not start in any of the next 4 weeks
+    even to cover a bye, and (2) whose departure costs (almost) no lineup points
+    over the season, e.g. a second kicker in a one-kicker league. He is swapped
+    only for a running back / receiver / tight end whose next-4-weeks average is
+    at least `margin` points above the depth he gives now (a kicker or a
+    quarterback gives no FLEX depth: 0)."""
+    settings = settings or WaiverSettings()
+    weeks = horizon(start_week, settings)
+    repl = list(replacements)
+    soon = set()
+    for w in weeks[:4]:
+        soon |= {p.pid for p in assign(roster, slots, lambda p, s, w=w: _weekly(p, w) + 1e-9) if p is not None}
+    costs = drop_costs(roster, slots, weeks, settings, repl)
+    by_pid = {p.pid: p for p in roster}
+
+    def depth(p: Player) -> float:
+        if p.position not in ("RB", "WR", "TE"):
+            return 0.0
+        return sum(_weekly(p, w) for w in weeks[:4]) / max(1, len(weeks[:4]))
+
+    # only spots that give no FLEX depth at all (extra kicker, defense, quarterback)
+    dead = sorted(((by_pid[pid], c) for pid, c in costs.items()
+                   if c < dead_below and depth(by_pid[pid]) == 0.0
+                   # a kicker/defense bye is covered from free agency for $0-2; a quarterback bye is not
+                   and (pid not in soon or by_pid[pid].position in ("K", "DEF"))), key=lambda x: x[1])
+    taken = set(exclude)
+    pool = [c for c in candidates if c.pid not in taken and c.position in ("RB", "WR", "TE") and c.pid not in by_pid]
+    base, _ = lineup_value(roster, slots, weeks, settings.discount, repl)
+    out: list[BenchUpgrade] = []
+    for drop, cost in dead:
+        best = None
+        for cand in pool:
+            d = depth(cand)
+            if d < depth(drop) + margin:
+                continue
+            trial = [p for p in roster if p.pid != drop.pid] + [cand]
+            gain = lineup_value(trial, slots, weeks, settings.discount, repl)[0] - base
+            if gain >= -dead_below and (best is None or (d, gain) > (best[2], best[1])):
+                best = (cand, gain, d)
+        if best is None:
+            continue
+        cand, gain, d = best
+        out.append(BenchUpgrade(cand, drop, cost, gain, d, cand.owner.upper().startswith("W")))
+        pool = [c for c in pool if c.pid != cand.pid]
+        roster = [p for p in roster if p.pid != drop.pid] + [cand]
+        base += gain
+        if len(out) >= limit:
+            break
+    return dead, out

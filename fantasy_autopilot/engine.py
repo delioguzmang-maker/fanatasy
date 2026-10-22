@@ -51,7 +51,7 @@ from .sources import espn, schedule
 from .sources.sleeper import Sleeper, injury_fields
 from .status import DEFAULT_PROBS, SEVERITY, apply_status_model, is_out, norm_status
 from .trade import evaluate_trade
-from .waivers import WaiverSettings, horizon, plan_claims, replacement_players
+from .waivers import WaiverSettings, bench_upgrades, horizon, plan_claims, replacement_players
 from .yahoo import parse
 from .yahoo.cookies import CookieSource
 from .yahoo.web import YahooSessionExpired, YahooWeb
@@ -360,6 +360,12 @@ class Autopilot:
         probs = dict(DEFAULT_PROBS)
         probs.update(self.cfg.status_probs)
         apply_status_model(players, self.cfg.p_play_overrides, probs)
+        lead = timedelta(minutes=self.cfg.inactives_posted_minutes)
+        for p in players:
+            if (p.status in ("Q", "D") and p.kickoff is not None and not p.locked
+                    and now < p.kickoff <= now + lead and p.prob < 0.95):
+                p.p_play = 0.95  # inactive lists are out (~90 min before kickoff) and he is not on it
+                p.notes.append("activo: la lista de inactivos ya salió y no está en ella")
 
     def _merge_sleeper(self, players: Sequence[Player], now: datetime) -> None:
         rank = {code: i for i, code in enumerate(SEVERITY)}
@@ -546,6 +552,7 @@ class Autopilot:
                 roster.players, self.note_text, self.now_fn(), self.tz,
                 penalty=self.cfg.role_penalty, penalty_undated=self.cfg.role_penalty_undated,
                 max_age_hours=self.cfg.role_news_hours, with_swap=False,
+                usage=self.usage(roster.players, roster.week), penalty_confirmed=self.cfg.role_penalty_confirmed,
             )
         except YahooSessionExpired:
             raise
@@ -555,6 +562,28 @@ class Autopilot:
         if failures:
             self.warnings.append("sin noticias (alerta de rol) de: " + ", ".join(failures[:5]))
         return alerts, good
+
+    def usage(self, players: Sequence[Player], week: int) -> dict[str, tuple[float, Optional[float]]]:
+        """Touches (carries + targets) in the last played game against the games before it."""
+        if not self.sleeper or week <= 2 or not hasattr(self.sleeper, "weekly_stats"):
+            return {}
+        stats = {}
+        for w in range(max(1, week - 4), week):
+            try:
+                stats[w] = self.sleeper.weekly_stats(self.season(), w)
+            except Exception as exc:  # noqa: BLE001
+                self.warnings.append(f"sin estadísticas de uso de la semana {w} (Sleeper): {str(exc)[:60]}")
+                return {}
+        out = {}
+        for p in players:
+            if p.position not in ("RB", "WR", "TE") or not p.sleeper_id:
+                continue
+            games = [float(s.get("rush_att", 0) or 0) + float(s.get("rec_tgt", 0) or 0)
+                     for w in sorted(stats) for s in [stats[w].get(str(p.sleeper_id))]
+                     if s and (s.get("off_snp") or s.get("gp") or s.get("rush_att") or s.get("rec_tgt"))]
+            if len(games) >= 2:
+                out[p.pid] = (games[-1], sum(games[:-1]) / len(games[:-1]))
+        return out
 
     def _role_replan(self, roster: Roster, plan: Any, alerts: Sequence[role_mod.RoleAlert],
                      opt: OptimizerSettings) -> tuple[str, float, str]:
@@ -835,6 +864,9 @@ class Autopilot:
         claims = plan_claims(waiver_roster, candidates, slots, week, roster_limit, balance, wset,
                              rival_max_balance=rival_max, replacements=repl,
                              league_bids=history if self.cfg.bid_history_cap else ())
+        after = [p for p in waiver_roster if p.pid not in {c.drop.pid for c in claims if c.drop}] + [c.add for c in claims]
+        dead, upgrades = bench_upgrades(after, candidates, slots, week, wset, repl,
+                                        exclude={c.add.pid for c in claims})
         writes = []
         if claims and (self.cfg.rehearsal or (self.cfg.writes_enabled and self.cfg.auto_claims)):
             browser = self.browser()
@@ -864,11 +896,13 @@ class Autopilot:
                         self.state.add_claim(week, c.add.pid)
         text = rpt.claims_report(week, self.cfg.mode, claims, balance, rival_max, history, writes,
                                  ir_moves, self.warnings, f"{self.web.url('/players')}?status=A")
+        text += rpt.bench_report(dead, upgrades)
         title = f"Waivers semana {week}: " + (
             ", ".join(f"{c.add.name} ${c.bid}" if c.on_waivers else f"{c.add.name} (FA)" for c in claims)
             if claims else "no pujes")
         return RunResult("waivers", title, text, changed=bool(claims), urgent=any(not w.ok for w in writes),
-                         writes=writes, data={"claims": claims, "candidates": candidates, "roster": roster})
+                         writes=writes, data={"claims": claims, "candidates": candidates, "roster": roster,
+                                              "dead_spots": dead, "bench_upgrades": upgrades})
 
     def matchup(self, week: Optional[int] = None) -> RunResult:
         self.warnings = []

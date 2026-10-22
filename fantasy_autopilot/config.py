@@ -59,9 +59,11 @@ class Config:
     role_check: bool = True
     role_penalty: float = 0.5            # projection multiplier with fresh role news
     role_penalty_undated: float = 0.75   # role news without a readable date
+    role_penalty_confirmed: float = 0.3  # fresh role news AND his touches already fell last game
     role_news_hours: float = 120.0       # older news is ignored
     role_auto_swap: bool = False         # True: the lineup itself counts the penalty (automatico)
     # alerts
+    inactives_posted_minutes: int = 60   # this close to kickoff a Q/D player not ruled out is active
     resend_minutes: int = 30             # repeat an urgent game-day alert nobody acted on
     max_resends: int = 4
     # win probability, not only points

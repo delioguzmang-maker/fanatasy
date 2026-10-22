@@ -21,6 +21,7 @@ PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
 TRENDING_URL = "https://api.sleeper.app/v1/players/nfl/trending/add"
 # Projections live on the .com host and need a browser User-Agent.
 PROJECTIONS_URL = "https://api.sleeper.com/projections/nfl/{season}/{week}"
+STATS_URL = "https://api.sleeper.com/stats/nfl/{season}/{week}"
 POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
 
 
@@ -92,6 +93,28 @@ class Sleeper:
             pid = str(row.get("player_id", ""))
             if pid and field in stats:
                 out[pid] = float(stats[field] or 0.0)
+        return out
+
+    def weekly_stats(self, season: int, week: int) -> dict[str, dict[str, Any]]:
+        """Real stats of one played week by Sleeper player id (snaps, carries, targets...).
+
+        A finished week is cached on disk: it does not change except for small corrections."""
+        cache = self.cache_dir / f"stats_{season}_{week}.json" if self.cache_dir else None
+        if cache and cache.exists():
+            return json.loads(cache.read_text())
+        params = [("season_type", "regular")] + [("position[]", p) for p in ("QB", "RB", "WR", "TE")]
+        rows = self._get(STATS_URL.format(season=season, week=week), params=params, timeout=60)
+        out: dict[str, dict[str, Any]] = {}
+        if isinstance(rows, list):
+            for row in rows:
+                pid = str(row.get("player_id", ""))
+                if pid:
+                    out[pid] = row.get("stats") or {}
+        elif isinstance(rows, dict):
+            out = {str(k): (v or {}) for k, v in rows.items()}
+        if cache and out:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(out))
         return out
 
     def trending_adds(self, hours: int = 24, limit: int = 40) -> list[dict[str, Any]]:

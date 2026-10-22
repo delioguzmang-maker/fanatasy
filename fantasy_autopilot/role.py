@@ -94,6 +94,7 @@ class RoleAlert:
     swap_pid: str = ""
     swap_name: str = ""
     swap_proj: float = 0.0
+    usage_note: str = ""       # last game's touches against his usual (Sleeper stats)
 
     @property
     def effective(self) -> float:
@@ -108,6 +109,12 @@ class RoleAlert:
         base = (f"{self.name} ({self.slot}) puede haber perdido el puesto ({when}): "
                 f"«{' | '.join(self.sentences)[:220]}». "
                 f"Proyección {self.proj:.2f} × {self.factor:g} = {self.effective:.2f}.")
+        if self.usage_note:
+            base += f" {self.usage_note}."
+        if not self.sentences:
+            base = (f"{self.name} ({self.slot}): {self.usage_note}. Sin noticia de rol: Yahoo ya suele bajar "
+                    f"su proyección ({self.proj:.2f}); revisa antes de dejarlo de titular.")
+            return base
         if not with_swap:
             return base
         if self.swap_pid:
@@ -116,6 +123,16 @@ class RoleAlert:
         else:
             base += " Ningún suplente le gana aun contándolo así: déjalo."
         return base
+
+
+def usage_drop(rec: Optional[tuple], min_base: float = 6.0, ratio: float = 0.4) -> str:
+    """(last game touches, usual touches) -> a Spanish note when the last game fell below 40%."""
+    if not rec:
+        return ""
+    last, base = rec
+    if base is None or base < min_base or last is None or last >= ratio * base:
+        return ""
+    return f"en su último partido tuvo {last:.0f} toques (acarreos + pases a él) contra {base:.1f} de costumbre"
 
 
 def note_text(payload: str) -> str:
@@ -211,6 +228,8 @@ def check_roster(
     penalty_undated: float = 0.75,
     max_age_hours: float = 120.0,
     with_swap: bool = True,
+    usage: Optional[dict] = None,
+    penalty_confirmed: float = 0.3,
 ) -> tuple[list[RoleAlert], list[str], list[str]]:
     """Alerts for unlocked starters with fresh role news, each with the best bench swap.
 
@@ -230,12 +249,17 @@ def check_roster(
             if sig.good:
                 good.append(f"{p.name} (banca): señal buena «{sig.good[0].text[:160]}»")
             continue
+        drop = usage_drop((usage or {}).get(p.pid))
         if not sig.bad:
+            if drop:  # usage fell but no news: warn only (Yahoo usually lowers the projection already)
+                alerts.append(RoleAlert(p.pid, p.name, p.slot, p.expected, 1.0, [], False, usage_note=drop))
             continue
         undated = not sig.fresh_bad
         factor = penalty_undated if undated else penalty
+        if drop and not undated:
+            factor = penalty_confirmed  # news AND his touches already fell: the role loss is real
         lines = [s.text for s in (sig.fresh_bad or sig.undated_bad)][:2]
-        alert = RoleAlert(p.pid, p.name, p.slot, p.expected, factor, lines, undated)
+        alert = RoleAlert(p.pid, p.name, p.slot, p.expected, factor, lines, undated, usage_note=drop or "")
         alerts.append(alert)
         if not with_swap:
             continue

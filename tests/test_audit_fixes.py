@@ -190,3 +190,68 @@ def test_blend_weights_per_position(tmp_path):
     k = pl("2", "K", "K", 8.0, pos="K", sleeper_id="s2")
     ap._sleeper_projections([wr, k], 7)
     assert wr.proj == round(0.5 * 10 + 0.5 * 20 * 0.9, 2) and k.proj == 8.0  # kickers stay Yahoo
+
+
+def test_second_kicker_is_a_dead_spot_but_bye_cover_is_not():
+    from fantasy_autopilot.waivers import WaiverSettings, bench_upgrades
+
+    slots = ["QB", "RB", "WR", "K"]
+    wk = lambda v, bye=None: {w: (0.0 if w == bye else v) for w in range(7, 18)}
+    roster = [Player("1", "QB1", "QB", eligible=["QB"], weekly=wk(20, bye=8)),
+              Player("2", "QB2", "QB", eligible=["QB"], weekly=wk(14)),
+              Player("3", "RB1", "RB", eligible=["RB"], weekly=wk(12)),
+              Player("4", "WR1", "WR", eligible=["WR"], weekly=wk(11)),
+              Player("5", "K1", "K", eligible=["K"], weekly=wk(8, bye=10)),
+              Player("6", "K2", "K", eligible=["K"], weekly=wk(7))]
+    from fantasy_autopilot.waivers import horizon, replacement_players
+
+    fa = [Player("9", "Depth WR", "WR", eligible=["WR"], weekly=wk(8), owner="FA")]
+    fa += [Player(f"k{i}", f"FA K{i}", "K", eligible=["K"], weekly=wk(7.5), owner="FA") for i in range(3)]
+    s = WaiverSettings()
+    repl = replacement_players(fa, slots, horizon(7, s), s)
+    dead, ups = bench_upgrades(roster, fa, slots, 7, s, repl)
+    # QB2 covers the week 8 bye: kept. K2 covers K1's week 10 bye, but a kicker is streamed for $0: dead.
+    assert [p.name for p, _ in dead] == ["K2"]
+    assert ups and ups[0].drop.name == "K2" and ups[0].add.name == "Depth WR" and not ups[0].on_waivers
+
+
+def test_week_audit_separates_luck_from_mistakes():
+    from fantasy_autopilot.audit import week_audit
+
+    slots = ["QB", "RB", "W/R/T"]
+    rows = [{"pid": "1", "jugador": "QB", "pos": "QB", "puesto": "QB", "proy": 24.37, "real": 19.36},
+            {"pid": "2", "jugador": "RB", "pos": "RB", "puesto": "RB", "proy": 14.4, "real": 8.8},
+            {"pid": "3", "jugador": "Skattebo", "pos": "RB", "puesto": "W/R/T", "proy": 10.24, "real": 0.0},
+            {"pid": "4", "jugador": "Keenan", "pos": "WR", "puesto": "BN", "proy": 9.48, "real": 12.2}]
+    a = week_audit(rows, slots, opponent=103.82)
+    assert round(a.scored, 2) == 28.16 and round(a.perfect, 2) == 40.36
+    assert a.decision_gap < 1 and a.came_in == (("Keenan", 12.2),) and a.went_out == (("Skattebo", 0.0),)
+    assert "ni la alineación perfecta" in a.verdict()
+
+
+def test_news_plus_usage_drop_confirms_role_loss():
+    starter = pl("1", "Skattebo", "RB", 10.24)
+    news = "Oct 18, 9:53 AM: Skattebo was benched after his fumbles."
+    alerts, _, _ = role.check_roster([starter], lambda pid: news, SUNDAY, TZ, usage={"1": (2.0, 16.0)})
+    assert alerts[0].factor == 0.3 and "2 toques" in alerts[0].describe(with_swap=False)
+    quiet, _, _ = role.check_roster([starter], lambda pid: "", SUNDAY, TZ, usage={"1": (2.0, 16.0)})
+    assert quiet[0].factor == 1.0 and "Sin noticia de rol" in quiet[0].describe()  # warn, no second discount
+    none, _, _ = role.check_roster([starter], lambda pid: "", SUNDAY, TZ, usage={"1": (12.0, 16.0)})
+    assert none == []
+
+
+def test_questionable_not_on_inactive_list_counts_as_active(tmp_path):
+    from datetime import datetime, timezone
+
+    from mock_yahoo import MockYahoo
+    from test_engine import pilot as make
+
+    noon_15 = datetime(2026, 9, 27, 16, 15, tzinfo=timezone.utc)   # 12:15 pm ET, 1 pm games
+    with MockYahoo() as mock:
+        ap = make(mock, tmp_path, now=noon_15)
+        r = ap.load_roster(3)
+        ap.enrich(r.players, 3)
+        warren = next(p for p in r.players if p.name == "Jaylen Warren")
+        nacua = next(p for p in r.players if p.name == "Puka Nacua")      # Q, plays 8:20 pm
+        assert warren.status == "Q" and warren.prob == 0.95
+        assert nacua.prob == 0.75
