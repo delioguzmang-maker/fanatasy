@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-FIELDS = ["time", "week", "pid", "name", "pos", "team", "status", "practice", "proj", "p_play", "slot"]
+FIELDS = ["time", "week", "pid", "name", "pos", "team", "status", "practice", "proj", "p_play", "slot", "sleeper_id"]
 
 
 def log_statuses(path: Path, week: int, players: Sequence, now: datetime) -> int:
@@ -31,6 +31,15 @@ def log_statuses(path: Path, week: int, players: Sequence, now: datetime) -> int
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists()
+    if not new:  # an older file without the newer columns: rewrite it once with the full header
+        with path.open(newline="") as fh:
+            header = next(csv.reader(fh), [])
+        if header != FIELDS:
+            old = read_log(path)
+            with path.open("w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=FIELDS, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(old)
     with path.open("a", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=FIELDS)
         if new:
@@ -38,7 +47,8 @@ def log_statuses(path: Path, week: int, players: Sequence, now: datetime) -> int
         for p in rows:
             w.writerow({"time": now.isoformat(timespec="minutes"), "week": week, "pid": p.pid, "name": p.name,
                         "pos": p.position, "team": p.team, "status": p.status, "practice": p.practice,
-                        "proj": round(p.proj, 2), "p_play": round(p.prob, 3), "slot": p.slot})
+                        "proj": round(p.proj, 2), "p_play": round(p.prob, 3), "slot": p.slot,
+                        "sleeper_id": p.sleeper_id or ""})
     return len(rows)
 
 
@@ -131,4 +141,73 @@ def player_sd(rows: Iterable[Mapping[str, object]], by_pos: Mapping[str, float],
         prior = by_pos[pos] ** 2
         shrunk = ((len(res) - 1) * var + strength * prior) / (len(res) - 1 + strength)
         out[pid] = round(shrunk ** 0.5, 2)
+    return out
+
+
+def questionable_split(
+    log_rows: Iterable[Mapping[str, str]],
+    actual: Mapping[tuple[int, str], float],
+    stats: Mapping[int, Mapping[str, Mapping]],
+    status: str = "Q",
+    min_cases: int = 30,
+) -> dict:
+    """Separate the two effects inside the Questionable discount.
+
+    Uses the real participation of each week (Sleeper stats: snaps, carries, targets)
+    for running backs, receivers and tight ends:
+
+    * play rate: how many Questionable players took the field (snaps or touches > 0);
+    * when active: touches against his usual touches in the other weeks, and
+      points ÷ projection against the same ratio for healthy players.
+
+    Points alone mix both effects (a 0 can be "did not play" or "played and did
+    nothing"); with snaps and touches they can be told apart."""
+    def touches(st):
+        return float(st.get("rush_att", 0) or 0) + float(st.get("rec_tgt", 0) or 0)
+
+    def played(st):
+        return bool(st) and bool(st.get("off_snp") or st.get("gp") or touches(st) > 0)
+
+    usual: dict[str, list[float]] = {}
+    for w, by_id in stats.items():
+        for sid, st in by_id.items():
+            if played(st):
+                usual.setdefault(str(sid), []).append((w, touches(st)))
+    snaps = last_snapshots(log_rows)
+    q_n = q_played = 0
+    q_load, q_pts, q_proj, h_pts, h_proj = [], 0.0, 0.0, 0.0, 0.0
+    for (w, pid), r in snaps.items():
+        sid = str(r.get("sleeper_id") or "")
+        if r.get("pos") not in ("RB", "WR", "TE") or not sid or w not in stats or (w, pid) not in actual:
+            continue
+        st = stats[w].get(sid, {})
+        proj = float(r.get("proj") or 0)
+        if proj <= 0:
+            continue
+        if r.get("status", "") == status:
+            q_n += 1
+            if played(st):
+                q_played += 1
+                q_pts += float(actual[(w, pid)])
+                q_proj += proj
+                other = [t for ww, t in usual.get(sid, []) if ww != w]
+                if other and sum(other) > 0:
+                    q_load.append(touches(st) / (sum(other) / len(other)))
+        elif r.get("status", "") == "" and played(st):
+            h_pts += float(actual[(w, pid)])
+            h_proj += proj
+    out = {"n": q_n, "played": q_played, "play_rate": None, "workload": None, "active_factor": None}
+    if q_n:
+        out["play_rate"] = q_played / q_n
+    if q_load:
+        out["workload"] = sum(q_load) / len(q_load)
+    if q_played and q_proj > 0 and h_proj > 0:
+        out["active_factor"] = (q_pts / q_proj) / (h_pts / h_proj)
+    if q_n < min_cases:
+        out["texto"] = (f"{q_n} casos {status} con participación conocida (faltan {min_cases - q_n} para separar "
+                        "'no jugó' de 'jugó limitado').")
+    else:
+        out["texto"] = (f"{q_n} casos {status}: jugaron {q_played} ({out['play_rate']:.0%}). Cuando jugaron: toques "
+                        f"{(out['workload'] or 0):.0%} de lo normal y puntos ÷ proyección "
+                        f"{(out['active_factor'] or 0):.2f} contra los sanos.")
     return out

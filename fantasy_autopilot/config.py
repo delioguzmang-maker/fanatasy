@@ -64,6 +64,7 @@ class Config:
     role_auto_swap: bool = False         # True: the lineup itself counts the penalty (automatico)
     # alerts
     inactives_posted_minutes: int = 60   # this close to kickoff a Q/D player not ruled out is active
+    active_q_factor: float = 0.95        # value of a Q player known to be active (cell 7d measures it)
     resend_minutes: int = 30             # repeat an urgent game-day alert nobody acted on
     max_resends: int = 4
     # win probability, not only points

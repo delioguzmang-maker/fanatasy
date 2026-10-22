@@ -363,8 +363,8 @@ class Autopilot:
         lead = timedelta(minutes=self.cfg.inactives_posted_minutes)
         for p in players:
             if (p.status in ("Q", "D") and p.kickoff is not None and not p.locked
-                    and now < p.kickoff <= now + lead and p.prob < 0.95):
-                p.p_play = 0.95  # inactive lists are out (~90 min before kickoff) and he is not on it
+                    and now < p.kickoff <= now + lead and p.prob < self.cfg.active_q_factor):
+                p.p_play = self.cfg.active_q_factor  # inactive lists are out (~90 min before) and he is not on it
                 p.notes.append("activo: la lista de inactivos ya salió y no está en ella")
 
     def _merge_sleeper(self, players: Sequence[Player], now: datetime) -> None:

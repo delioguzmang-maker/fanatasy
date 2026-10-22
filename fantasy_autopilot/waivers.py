@@ -271,6 +271,7 @@ def bench_upgrades(
     exclude: Iterable[str] = (),
     dead_below: float = 0.5,
     margin: float = 1.0,
+    flex_margin: float = 1.5,
     limit: int = 3,
 ) -> tuple[list[tuple[Player, float]], list[BenchUpgrade]]:
     """Dead roster spots and the free agents who would fill them better.
@@ -323,4 +324,31 @@ def bench_upgrades(
         base += gain
         if len(out) >= limit:
             break
+    # second pass: the weakest running back / receiver / tight end on the bench, when a free agent is
+    # clearly better both soon and for the rest of the season and the lineup does not lose points
+    def ros(p: Player) -> float:
+        return sum(_weekly(p, w) for w in weeks) / max(1, len(weeks))
+
+    starters_now = {p.pid for p in assign(roster, slots, lambda p, s: _weekly(p, weeks[0]) + 1e-9) if p is not None}
+    weak = sorted((p for p in roster if p.pid in costs and p.position in ("RB", "WR", "TE")
+                   and p.pid not in starters_now), key=ros)
+    for drop in weak:
+        if len(out) >= limit:
+            break
+        best = None
+        for cand in pool:
+            if ros(cand) < ros(drop) + flex_margin or depth(cand) < depth(drop):
+                continue
+            trial = [p for p in roster if p.pid != drop.pid] + [cand]
+            gain = lineup_value(trial, slots, weeks, settings.discount, repl)[0] - base
+            if gain >= 0 and (best is None or (ros(cand), gain) > (ros(best[0]), best[1])):
+                best = (cand, gain)
+        if best is None:
+            continue
+        cand, gain = best
+        out.append(BenchUpgrade(cand, drop, costs.get(drop.pid, 0.0), gain, depth(cand),
+                                cand.owner.upper().startswith("W")))
+        pool = [c for c in pool if c.pid != cand.pid]
+        roster = [p for p in roster if p.pid != drop.pid] + [cand]
+        base += gain
     return dead, out

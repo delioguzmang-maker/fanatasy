@@ -255,3 +255,48 @@ def test_questionable_not_on_inactive_list_counts_as_active(tmp_path):
         nacua = next(p for p in r.players if p.name == "Puka Nacua")      # Q, plays 8:20 pm
         assert warren.status == "Q" and warren.prob == 0.95
         assert nacua.prob == 0.75
+
+
+def test_weak_bench_back_replaced_by_clearly_better_free_agent():
+    from fantasy_autopilot.waivers import WaiverSettings, bench_upgrades
+
+    slots = ["RB", "WR", "W/R/T"]
+    wk = lambda v: {w: v for w in range(7, 18)}
+    roster = [Player("1", "RB1", "RB", eligible=["RB", "W/R/T"], weekly=wk(14)),
+              Player("2", "WR1", "WR", eligible=["WR", "W/R/T"], weekly=wk(13)),
+              Player("3", "WR2", "WR", eligible=["WR", "W/R/T"], weekly=wk(9)),
+              Player("4", "Gainwell", "RB", eligible=["RB", "W/R/T"], weekly=wk(5.5))]
+    fa = [Player("8", "White", "RB", eligible=["RB", "W/R/T"], weekly=wk(7.0), owner="W (Wed)"),
+          Player("9", "Meh", "RB", eligible=["RB", "W/R/T"], weekly=wk(6.0), owner="FA")]
+    dead, ups = bench_upgrades(roster, fa, slots, 7, WaiverSettings())
+    assert dead == [] and [(u.drop.name, u.add.name, u.on_waivers) for u in ups] == [("Gainwell", "White", True)]
+
+
+def test_questionable_split_separates_not_playing_from_limited(tmp_path):
+    log, actual, stats = [], {}, {6: {}, 5: {}, 4: {}}
+    for i in range(40):
+        sid, pid = f"s{i}", f"p{i}"
+        log.append({"time": "t", "week": 6, "pid": pid, "pos": "RB", "status": "Q", "proj": 10, "sleeper_id": sid})
+        for w in (4, 5):
+            stats[w][sid] = {"off_snp": 40, "rush_att": 15, "rec_tgt": 5}
+        if i % 4 == 0:                      # 1 of 4 did not play
+            actual[(6, pid)] = 0.0
+        else:                               # the rest played with half the work
+            stats[6][sid] = {"off_snp": 20, "rush_att": 7, "rec_tgt": 3}
+            actual[(6, pid)] = 6.0
+    for i in range(40):
+        sid, pid = f"h{i}", f"hp{i}"
+        log.append({"time": "t", "week": 6, "pid": pid, "pos": "WR", "status": "", "proj": 10, "sleeper_id": sid})
+        stats[6][sid] = {"off_snp": 50, "rec_tgt": 7}
+        actual[(6, pid)] = 10.0
+    res = calibration.questionable_split(log, actual, stats)
+    assert res["n"] == 40 and res["played"] == 30 and abs(res["play_rate"] - 0.75) < 1e-9
+    assert abs(res["workload"] - 0.5) < 1e-9 and abs(res["active_factor"] - 0.6) < 1e-9
+
+
+def test_status_log_upgrades_old_header(tmp_path):
+    path = tmp_path / "estado_log.csv"
+    path.write_text("time,week,pid,name,pos,team,status,practice,proj,p_play,slot\nt,6,9,A,RB,X,Q,,10,0.75,RB\n")
+    calibration.log_statuses(path, 7, [pl("1", "B", "RB", 8.0, sleeper_id="s1")], SUNDAY)
+    rows = calibration.read_log(path)
+    assert [r["pid"] for r in rows] == ["9", "1"] and rows[1]["sleeper_id"] == "s1" and rows[0]["sleeper_id"] == ""
