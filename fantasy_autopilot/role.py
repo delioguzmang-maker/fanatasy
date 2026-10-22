@@ -108,7 +108,8 @@ class RoleAlert:
         when = "noticia sin fecha, confírmala" if self.undated else "noticia reciente"
         base = (f"{self.name} ({self.slot}) puede haber perdido el puesto ({when}): "
                 f"«{' | '.join(self.sentences)[:220]}». "
-                f"Proyección {self.proj:.2f} × {self.factor:g} = {self.effective:.2f}.")
+                f"Escenario si de verdad perdió el rol (no es una medición): {self.proj:.2f} × {self.factor:g} = "
+                f"{self.effective:.2f}.")
         if self.usage_note:
             base += f" {self.usage_note}."
         if not self.sentences:

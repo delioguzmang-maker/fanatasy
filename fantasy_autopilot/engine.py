@@ -107,7 +107,7 @@ class State:
         digest = hashlib.sha256(text.encode()).hexdigest()[:16]
         rec = self.data.setdefault("alerts", {}).get(key)
         if not rec or rec.get("digest") != digest:
-            self.data["alerts"][key] = {"digest": digest, "t": now, "n": 1}
+            self.data["alerts"][key] = {"digest": digest, "t": now, "n": 1, "urgent": urgent}
             self.save()
             return True, 0
         if urgent and rec.get("n", 1) <= max_resends and now - rec.get("t", 0) >= resend_minutes * 60:
@@ -115,6 +115,24 @@ class State:
             self.save()
             return True, rec["n"] - 1
         return False, rec.get("n", 1)
+
+    def resolve(self, key: str) -> bool:
+        """True once when the last alert for `key` was urgent and is now resolved."""
+        rec = self.data.get("alerts", {}).get(key)
+        if rec and rec.get("urgent"):
+            rec["urgent"] = False
+            rec["digest"] = ""
+            self.save()
+            return True
+        return False
+
+    def log_decision(self, path: Path, record: dict) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            pass
 
     def cached_note(self, pid: str, now: float, ttl: float = 600) -> Optional[str]:
         rec = self.data.get("notes", {}).get(pid)
@@ -178,8 +196,11 @@ class Autopilot:
         return f"{self.web.base_url}/f1/{self.cfg.league_id}/{self.cfg.team_id}"
 
     def opt_settings(self) -> OptimizerSettings:
+        hedge = self.cfg.hedge_reliability
+        if self.cfg.mode == "sugerir":
+            hedge = min(hedge, self.cfg.hedge_reliability_sugerir)  # a person must make the swap in time
         return OptimizerSettings(
-            hedge_reliability=self.cfg.hedge_reliability,
+            hedge_reliability=hedge,
             uncertain_penalty=self.cfg.uncertain_penalty,
             assume_autoswap=self.cfg.assume_autoswap,
         )
@@ -307,6 +328,12 @@ class Autopilot:
                 game_text=r.game_text,
                 raw_text=r.raw_text,
             ))
+        if mine:
+            bad_ir = [p.name for p in players if p.slot == "IR"
+                      and p.status not in ("IR", "O", "PUP", "NFI", "SUSP", "D", "NA", "COVID")]
+            if bad_ir:
+                self.warnings.append("URGENTE: en IR está alguien que ya no califica (" + ", ".join(bad_ir)
+                                     + "). Yahoo bloquea tus altas y bajas hasta que lo saques del IR.")
         return Roster(
             league_id=self.cfg.league_id, team_id=str(team_id or self.cfg.team_id), week=week, slots=slots,
             players=players, bench_size=tp.bench_size, ir_size=tp.ir_size, team_name=tp.team_name,
@@ -350,6 +377,8 @@ class Autopilot:
                 + f"{sample.name}: «{sample.raw_text[:120]}»"
             )
         if self.sleeper:
+            if now.astimezone(self.tz).weekday() in (0, 3, 6) and hasattr(self.sleeper, "max_age_hours"):
+                self.sleeper.max_age_hours = 0.33   # Monday, Thursday, Sunday: injuries change by the hour
             try:
                 self._merge_sleeper(players, now)
             except Exception as exc:  # noqa: BLE001
@@ -512,8 +541,34 @@ class Autopilot:
             if wswap is not None:
                 extra.append("PARA GANAR, NO SOLO SUMAR PUNTOS:")
                 extra.append(f"  → {wswap.describe()}")
+        now = self.now_fn()
+        if decided and self.cfg.mode == "sugerir":
+            kicks = [m.player.kickoff for m in moves if m.player.kickoff is not None and m.player.kickoff > now]
+            if kicks:
+                first = min(kicks)
+                extra.append(f"PLAZO: haz estos cambios en Yahoo antes de las {rpt.when(first, self.tz)} "
+                             "(empieza el primer partido de los jugadores que se mueven). Esta alerta se repite "
+                             "hasta que Yahoo muestre la alineación nueva.")
+        pending = [p for p in roster.players if p.slot != "IR" and not p.locked and p.kickoff is not None
+                   and p.kickoff > now and (p.is_starter or 0 < p.prob < 1)]
+        if pending:
+            nxt = min(pending, key=lambda p: p.kickoff)
+            check = nxt.kickoff - timedelta(minutes=85)
+            if check > now:
+                extra.append(f"PRÓXIMO CONTROL: {rpt.when(check, self.tz)}, cuando salen los inactivos del partido de "
+                             f"{nxt.name} ({rpt.when(nxt.kickoff, self.tz)}). Revisa ahí también la alerta de rol.")
         if extra:
             text += "\n" + "\n".join(extra)
+        self.state.log_decision(self.cfg.state_path / "decisiones_log.jsonl", {
+            "time": now.isoformat(timespec="minutes"), "week": week, "gameday": gameday, "mode": self.cfg.mode,
+            "yahoo_now": {p.name: p.slot for p in roster.players},
+            "recomendado": {next((x.name for x in roster.players if x.pid == pid), pid): s
+                            for pid, s in plan.target_slots().items()},
+            "estados": {p.name: [p.status, round(p.proj, 2), round(p.prob, 2)] for p in roster.players},
+            "alertas_rol": [[a.name, a.factor, a.sentences, a.usage_note] for a in role_alerts],
+            "cambios": [m.describe() for m in moves], "decidido": decided,
+            "escrito": [w.detail for w in writes],
+        })
         failed = any(not w.ok for w in writes)
         role_urgent = role_gain > 0.01 and not role_applied
         urgent = (failed or bool(stuck) or (gameday and decided and self.cfg.mode == "sugerir")
@@ -561,6 +616,24 @@ class Autopilot:
             return [], []
         if failures:
             self.warnings.append("sin noticias (alerta de rol) de: " + ", ".join(failures[:5]))
+        by_pid = roster.by_pid()
+        for a in alerts:
+            if a.factor >= 1.0:
+                continue
+            try:  # did Yahoo already lower this week's projection for the same news?
+                future = [v for w, v in sorted(projected_weekly(self.web.playernote(a.player_pid), roster.week).items())
+                          if w > roster.week and v > 0][:3]
+            except YahooSessionExpired:
+                raise
+            except Exception:  # noqa: BLE001
+                future = []
+            now_proj = by_pid[a.player_pid].proj
+            if future and now_proj <= 0.7 * (sum(future) / len(future)):
+                avg = sum(future) / len(future)
+                a.factor = 1.0
+                a.usage_note = ((a.usage_note + "; ") if a.usage_note else "") + (
+                    f"Yahoo ya bajó su proyección ({now_proj:.2f} esta semana contra {avg:.2f} en las próximas): "
+                    "no se descuenta otra vez")
         return alerts, good
 
     def usage(self, players: Sequence[Player], week: int) -> dict[str, tuple[float, Optional[float]]]:
@@ -851,7 +924,12 @@ class Autopilot:
         ir_moves = [p for p in active if p.ir_eligible and p.slot == "BN"][: roster.open_ir_spots()]
         waiver_roster = [p for p in active if p not in ir_moves]
         week = self._weekly_for_roster(waiver_roster, week)  # skip a week that is already played
+        failed_before = len(self.web.failed_notes)
         candidates = self._candidates(week, roster, slots)
+        failed = self.web.failed_notes[failed_before:]
+        if failed:
+            self.warnings.append(f"WAIVERS INCOMPLETO: fallaron {len(failed)} notas de Yahoo. No confíes en un "
+                                 "\"no pujes\"; espera 1 hora y vuelve a correrlo.")
         wset = self.waiver_settings()
         repl = replacement_players(candidates, slots, horizon(week, wset), wset)
         history: list[int] = []
@@ -1123,6 +1201,11 @@ class Autopilot:
 
     # --------------------------------------------------------- delivery
     def deliver(self, result: RunResult, dedupe: bool = True) -> RunResult:
+        if (dedupe and result.task == "gameday" and not result.urgent and not result.changed
+                and self.notifier.enabled and self.state.resolve("gameday")):
+            self.notifier.send("✓ Listo: Yahoo ya tiene la alineación recomendada",
+                               "La alerta anterior quedó resuelta: tu alineación en Yahoo coincide con la recomendada.",
+                               urgent=False, click_url=self.team_url)
         if not result.notify or not self.notifier.enabled:
             return result
         title = result.title

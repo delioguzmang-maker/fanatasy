@@ -300,3 +300,84 @@ def test_status_log_upgrades_old_header(tmp_path):
     calibration.log_statuses(path, 7, [pl("1", "B", "RB", 8.0, sleeper_id="s1")], SUNDAY)
     rows = calibration.read_log(path)
     assert [r["pid"] for r in rows] == ["9", "1"] and rows[1]["sleeper_id"] == "s1" and rows[0]["sleeper_id"] == ""
+
+
+def test_yahoo_cache_never_freezes_team_page_and_retries_999(monkeypatch):
+    import types
+
+    from fantasy_autopilot.yahoo import web as W
+
+    calls = []
+    codes = {"/f1/1/playernote": [999, 200], "/f1/1/7": [200, 200]}
+
+    def get(url, params=None, timeout=40):
+        path = url.split("yahoo.com")[1]
+        calls.append(path)
+        code = codes[path].pop(0) if codes[path] else 200
+        return types.SimpleNamespace(url=url, text=f"<html>{len(calls)}</html>", status_code=code)
+
+    monkeypatch.setattr(W.time, "sleep", lambda s: None)
+    y = W.YahooWeb("1", "7", [{"name": "T", "value": "x"}], delay=0, session=types.SimpleNamespace(
+        get=get, cookies=types.SimpleNamespace(set=lambda *a, **k: None)))
+    a = y.get("/playernote", {"pid": "5"})
+    b = y.get("/playernote", {"pid": "5"})
+    assert a is b and calls.count("/f1/1/playernote") == 2      # one 999, one retry, then cached
+    y.get("/7"); y.get("/7")
+    assert calls.count("/f1/1/7") == 2                          # team page: always fresh
+
+
+def test_lineup_shows_deadline_next_check_and_logs_decision(tmp_path):
+    import json as _json
+
+    from mock_yahoo import MockYahoo
+    from test_engine import FRIDAY, pilot as make
+
+    with MockYahoo() as mock:
+        res = make(mock, tmp_path, now=FRIDAY, mode="sugerir").lineup()
+        assert res.changed and "PLAZO: haz estos cambios en Yahoo antes de" in res.text
+        assert "PRÓXIMO CONTROL:" in res.text
+        rec = [_json.loads(x) for x in (tmp_path / "decisiones_log.jsonl").read_text().splitlines()][-1]
+        assert rec["decidido"] and rec["cambios"] and rec["yahoo_now"]["Rashod Bateman"] == "WR"
+
+
+def test_resolved_urgent_alert_sends_one_confirmation(tmp_path):
+    from fantasy_autopilot.engine import RunResult
+
+    from mock_yahoo import MockYahoo
+    from test_engine import FRIDAY, pilot as make
+
+    sent = []
+    with MockYahoo() as mock:
+        ap = make(mock, tmp_path, now=FRIDAY)
+        ap.notifier.ntfy_topic = "x"
+        ap.notifier.send = lambda title, body, urgent=False, click_url=None: sent.append(title) or []
+        ap.deliver(RunResult("gameday", "⚠ Cambia tu alineación YA", "A", changed=True, urgent=True))
+        ap.deliver(RunResult("gameday", "Alineación: sin cambios", "B", notify=False))
+        ap.deliver(RunResult("gameday", "Alineación: sin cambios", "B", notify=False))
+    assert sent == ["⚠ Cambia tu alineación YA", "✓ Listo: Yahoo ya tiene la alineación recomendada"]
+
+
+def test_no_second_discount_when_yahoo_already_lowered(tmp_path):
+    import json
+
+    from mock_yahoo import MockYahoo
+    from test_engine import SUNDAY_1145_ET, pilot as make
+
+    with MockYahoo() as mock:
+        ap = make(mock, tmp_path, now=SUNDAY_1145_ET)
+        r = ap.load_roster(3)
+        ap.enrich(r.players, 3)
+        sk = next(p for p in r.players if p.name == "Cam Skattebo")
+        orig = mock.playernote
+
+        def note(pid):
+            if pid != sk.pid:
+                return orig(pid)
+            rows = "".join(f"<tr><td>{w}</td><td>vs X</td><td>*{v}</td></tr>" for w, v in ((3, 6.0), (4, 13.0), (5, 13.0)))
+            return json.dumps({"content": "<p>Sep 27, 9:00 AM: Skattebo was benched after fumbles.</p>"
+                               f"<table><thead><tr><th>Week</th><th>Opp</th><th>Fan Pts</th></tr></thead><tbody>{rows}</tbody></table>"})
+        mock.playernote = note
+        sk.proj = 6.0
+        alerts, _ = ap.role_alerts(r)
+        a = next(x for x in alerts if x.name == "Cam Skattebo")
+        assert a.factor == 1.0 and "Yahoo ya bajó su proyección" in a.usage_note

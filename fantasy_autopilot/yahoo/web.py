@@ -37,6 +37,11 @@ class Page:
 
 
 class YahooWeb:
+    # Seconds a page may be reused. Your team page, the league home and every save are never cached,
+    # so game-day lineups and inactive swaps always see fresh data (cell 3b's old cache froze them).
+    CACHE_TTL = {"/playernote": 600, "/players": 1800, "/teams": 600, "/settings": 86400, "/transactions": 900}
+    RETRY_999 = (30, 90, 300)   # Yahoo's "too many requests" answer: wait and retry
+
     def __init__(
         self,
         league_id: Union[str, int],
@@ -62,6 +67,9 @@ class YahooWeb:
                 c["name"], c["value"], domain=c.get("domain") or ".yahoo.com", path=c.get("path") or "/"
             )
         self._last = 0.0
+        self._cache: dict = {}
+        self.cache_enabled = True
+        self.failed_notes: list[tuple[str, str]] = []
 
     # ------------------------------------------------------------------ http
     def url(self, path: str = "") -> str:
@@ -73,17 +81,38 @@ class YahooWeb:
             time.sleep(wait)
         self._last = time.monotonic()
 
+    def _ttl(self, path: str) -> int:
+        return next((v for p, v in self.CACHE_TTL.items() if path.startswith(p)), 0)
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
     def get(self, path: str = "", params: Optional[dict] = None) -> Page:
-        self._pause()
-        resp = self.session.get(self.url(path), params=params, timeout=40)
+        key = (path, tuple(sorted((params or {}).items())))
+        ttl = self._ttl(path) if self.cache_enabled else 0
+        hit = self._cache.get(key)
+        if ttl and hit and time.monotonic() - hit[0] < ttl:
+            return hit[1]
+        for wait in (0,) + tuple(self.RETRY_999):
+            if wait:
+                time.sleep(wait)
+            self._pause()
+            resp = self.session.get(self.url(path), params=params, timeout=40)
+            if resp.status_code != 999:
+                break
         if parse.is_login_page(resp.url, resp.text):
             raise YahooSessionExpired(
                 "Yahoo pidió iniciar sesión: las cookies vencieron. Copia de nuevo el valor "
                 "de 'Cookie' desde tu navegador (ver README, paso 2) y actualiza YAHOO_COOKIES."
             )
+        if resp.status_code == 999:
+            raise YahooPageError("Yahoo sigue frenando las visitas (HTTP 999). Vuelve a intentar en 1 o 2 horas.")
         if resp.status_code >= 400:
             raise YahooPageError(f"GET {resp.url} -> HTTP {resp.status_code}")
-        return Page(resp.url, resp.text)
+        page = Page(resp.url, resp.text)
+        if ttl:
+            self._cache[key] = (time.monotonic(), page)
+        return page
 
     # ----------------------------------------------------------------- reads
     def team_page(self, team_id: Optional[str] = None, week: Optional[int] = None) -> tuple[Page, parse.TeamPage]:
@@ -125,7 +154,13 @@ class YahooWeb:
         return parse.parse_players_page(self.get("/players", params).html, self.base_url)
 
     def playernote(self, pid: str) -> parse.PlayerNote:
-        page = self.get("/playernote", {"pid": pid})
+        try:
+            page = self.get("/playernote", {"pid": pid})
+        except YahooSessionExpired:
+            raise
+        except Exception as exc:  # noqa: BLE001 - counted so a "no bids" with missing data is flagged
+            self.failed_notes.append((pid, str(exc)[:80]))
+            raise
         return parse.parse_playernote(page.html, pid)
 
     def transactions(self) -> list[parse.FaabTransaction]:
@@ -137,6 +172,7 @@ class YahooWeb:
 
         `target` maps Yahoo player id -> new slot ("BN", "WR", "W/R/T", ...).
         """
+        self.clear_cache()
         target = {pid: norm_slot(slot) for pid, slot in target.items()}
         if not target:
             return WriteResult(ok=True, action="lineup", detail="sin cambios", dry_run=dry_run)

@@ -72,7 +72,7 @@ def test_notebook_cells_run_against_mock(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Semana 3" in out
     assert "Alineación semana 3" in out
-    assert "Parches activos" in out
+    assert "Parches incluidos en el paquete" in out
     assert "Ninguna noticia de pérdida de rol" in out
     assert "Rival FC" in out
     assert "Waivers semana 3" in out

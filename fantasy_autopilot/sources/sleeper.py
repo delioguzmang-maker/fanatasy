@@ -30,6 +30,8 @@ class Sleeper:
         self.session = session or make_session()
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self._players: Optional[dict[str, dict[str, Any]]] = None
+        self._loaded_at = 0.0
+        self.max_age_hours = 12.0   # the engine lowers it to 20 minutes on game days
         self._by_yahoo: Optional[dict[str, dict[str, Any]]] = None
         self._by_name: Optional[dict[tuple[str, str], dict[str, Any]]] = None
 
@@ -42,9 +44,13 @@ class Sleeper:
         """{'season': '2026', 'week': 3, 'season_type': 'regular', ...}"""
         return self._get(STATE_URL)
 
-    def players(self, max_age_hours: float = 12.0) -> dict[str, dict[str, Any]]:
-        if self._players is not None:
+    def players(self, max_age_hours: Optional[float] = None) -> dict[str, dict[str, Any]]:
+        max_age_hours = self.max_age_hours if max_age_hours is None else max_age_hours
+        if self._players is not None and time.time() - self._loaded_at < max_age_hours * 3600:
             return self._players
+        if self._players is not None:  # stale in a long session (the Sunday loop): reload
+            self._players = self._by_yahoo = self._by_name = None
+        self._loaded_at = time.time()
         cache = self.cache_dir / "sleeper_players.json" if self.cache_dir else None
         if cache and cache.exists() and time.time() - cache.stat().st_mtime < max_age_hours * 3600:
             self._players = json.loads(cache.read_text())

@@ -27,6 +27,7 @@ class Config:
     min_gain: float = 0.3                 # expected points needed to change a weekly lineup
     gameday_min_gain: float = 0.5
     hedge_reliability: float = 0.85
+    hedge_reliability_sugerir: float = 0.5   # in "sugerir" a person makes the game-day swap: count it at half
     uncertain_penalty: float = 0.75
     assume_autoswap: bool = True          # the game-day loop / GitHub Action is running
     p_play_overrides: dict[str, float] = field(default_factory=dict)   # {"Puka Nacua": 0.3}
