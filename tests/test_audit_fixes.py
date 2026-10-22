@@ -171,3 +171,22 @@ def test_starter_out_without_backup_suggests_free_agent(tmp_path):
         assert res.urgent and "Puesto vacío" in res.title
         assert "Jacoby Brissett" in res.data["rescue"][0] and "+18.70" in res.data["rescue"][0]
         assert not mock.claims and not mock.posts  # suggestion only
+
+
+def test_blend_weights_per_position(tmp_path):
+    from fantasy_autopilot.config import Config
+    from fantasy_autopilot.engine import Autopilot
+
+    class S:
+        def projections(self, *a, **k):
+            return {"s1": 20.0, "s2": 10.0}
+
+    cfg = Config(league_id="1", team_id="1", state_dir=str(tmp_path), projections="blend",
+                 blend_weight_pos={"WR": 0.5}, blend_scale_pos={"WR": 0.9}, season=2026)
+    ap = Autopilot.__new__(Autopilot)
+    ap.cfg, ap.sleeper, ap.warnings = cfg, S(), []
+    ap._settings = type("L", (), {"reception_points": 0.5})()
+    wr = pl("1", "W", "WR", 10.0, pos="WR", sleeper_id="s1")
+    k = pl("2", "K", "K", 8.0, pos="K", sleeper_id="s2")
+    ap._sleeper_projections([wr, k], 7)
+    assert wr.proj == round(0.5 * 10 + 0.5 * 20 * 0.9, 2) and k.proj == 8.0  # kickers stay Yahoo

@@ -27,7 +27,8 @@ def test_notebook_is_valid_and_has_the_steps():
     cells = code_cells()
     titles = [c.splitlines()[0] for c in cells]
     assert titles[0].startswith("#@title 1. Instalar")
-    for step in ("3b. Parches", "4b. Alerta de rol", "6c. Inteligencia", "6d. Lesionados",
+    for step in ("3b. Parches", "4b. Alerta de rol", "6c. Inteligencia", "6d. Lesionados", "6e. Historia",
+                 "7e. Proyección propia",
                  "Piloto automático del domingo"):
         assert any(step in t for t in titles), step
     assert any(c.startswith("# ===== CELDA 7d") for c in cells)

@@ -54,8 +54,10 @@ class MockYahoo:
             f"/f1/{LEAGUE}/players": (FIXTURES / "players_page.html").read_text(),
             f"/f1/{LEAGUE}/4": (FIXTURES / "opponent_page.html").read_text(),
             f"/f1/{LEAGUE}/transactions": "<html><body><table>"
-            "<tr><td><a href='https://sports.yahoo.com/nfl/players/1'>Josh Downs</a></td><td>Waiver $11</td></tr>"
-            "<tr><td><a href='https://sports.yahoo.com/nfl/teams/kc'>Kansas City</a></td><td>Waiver $12</td></tr>"
+            "<tr><td><a href='https://sports.yahoo.com/nfl/players/1'>Josh Downs</a> IND - WR Waiver $11</td>"
+            f"<td><a href='/f1/{LEAGUE}/4'>Rival FC</a> Sep 23, 3:10 am</td></tr>"
+            "<tr><td><a href='https://sports.yahoo.com/nfl/teams/kc'>Kansas City</a> KC - DEF Waiver $12</td>"
+            f"<td><a href='/f1/{LEAGUE}/4'>Rival FC</a> Sep 23, 3:10 am</td></tr>"
             "</table></body></html>",
         }
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())

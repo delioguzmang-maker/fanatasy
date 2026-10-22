@@ -37,6 +37,8 @@ class Config:
     use_espn: bool = True
     projections: str = "yahoo"            # yahoo | sleeper | blend
     blend_weight: float = 0.5             # Sleeper share when projections == "blend"
+    blend_weight_pos: dict[str, float] = field(default_factory=dict)  # per position (cell 7e); missing = 0
+    blend_scale_pos: dict[str, float] = field(default_factory=dict)   # Sleeper points -> league scoring
     # waivers / FAAB
     faab_budget: int = 100
     faab_balance: Optional[int] = None    # None = read from Yahoo's Teams page

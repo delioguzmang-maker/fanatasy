@@ -396,7 +396,9 @@ class Autopilot:
             if self.cfg.projections == "sleeper" or (p.proj == 0 and not p.on_bye and not is_out(p.status)):
                 p.proj = s
             elif self.cfg.projections == "blend":
-                p.proj = round((1 - w) * p.proj + w * s, 2)
+                wp = self.cfg.blend_weight_pos.get(p.position, 0.0) if self.cfg.blend_weight_pos else w
+                scale = self.cfg.blend_scale_pos.get(p.position, 1.0)
+                p.proj = round((1 - wp) * p.proj + wp * s * scale, 2)
 
     # ------------------------------------------------------------ writes
     def write_lineup(self, target: dict[str, str], week: int) -> Optional[WriteResult]:

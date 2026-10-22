@@ -598,3 +598,120 @@ def parse_transactions_page(html: str) -> list[FaabTransaction]:
             continue
         out.append(FaabTransaction(_text(link), int(m.group(1)), row[:160]))
     return out
+
+
+@dataclass
+class TxPlayer:
+    name: str
+    pid: str
+    pos: str = ""
+    nfl: str = ""
+    action: str = "?"            # alta / baja / trade / ?
+    bid: Optional[int] = None
+
+
+@dataclass
+class Transaction:
+    month: str
+    day: int
+    time: str
+    team_ids: list[str]
+    kind: str                    # "trade" or "add/drop"
+    players: list[TxPlayer]
+    text: str = ""
+
+
+_TX_DATE = re.compile(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),?\s+(\d{1,2}:\d{2}\s?[ap]m)", re.I)
+_TX_POS = re.compile(r"\b([A-Z]{2,3})\s?-\s?(QB|RB|WR|TE|K|DEF)\b")
+_TX_POS_ONLY = re.compile(r"-\s?(QB|RB|WR|TE|K|DEF)\b")
+
+
+def _player_key(href: str) -> str:
+    m = re.search(r"/nfl/players/(\d+)", href)
+    if m:
+        return m.group(1)
+    m = re.search(r"/nfl/teams/([a-z0-9-]+)", href, re.I)
+    return f"team:{m.group(1).lower()}" if m else href
+
+
+def parse_transactions_full(html: str) -> list[Transaction]:
+    """Every row of /f1/<league>/transactions: who added, dropped or traded whom.
+
+    Yahoo prints a player twice in a row (the name link and an icon/news link with
+    no text). Anchors are grouped by player id, and each player's text segment runs
+    from his name to the next player's name, so position, action and bid stay with
+    the right player."""
+    soup = soup_of(html)
+    out: list[Transaction] = []
+    seen: set[str] = set()
+    for tr in soup.select("tr"):
+        text = _text(tr)
+        date = _TX_DATE.search(text)
+        anchors = tr.select("a[href*='/nfl/players/'], a[href*='/nfl/teams/']")
+        if not date or not anchors:
+            continue
+        sig = text[:240]
+        if sig in seen:
+            continue
+        seen.add(sig)
+        names: dict[str, str] = {}
+        order: list[str] = []
+        for a in anchors:
+            key = _player_key(a.get("href", ""))
+            label = _text(a)
+            if key not in names:
+                order.append(key)
+                names[key] = ""
+            if label and not names[key]:
+                names[key] = label
+        order = [k for k in order if names[k]]
+        team_ids = []
+        for a in tr.select("a[href*='/f1/']"):
+            m = re.search(r"/f1/\d+/(\d+)(?:$|[/?#])", a.get("href", ""))
+            if m and m.group(1) not in team_ids:
+                team_ids.append(m.group(1))
+        kind = "trade" if re.search(r"\btrade", text, re.I) else "add/drop"
+        # locate each name in order, then cut segments
+        starts, cursor = [], 0
+        for k in order:
+            i = text.find(names[k], cursor)
+            if i < 0:
+                i = text.find(names[k])
+            starts.append(max(i, 0))
+            cursor = max(i, 0) + len(names[k])
+        players = []
+        for idx, k in enumerate(order):
+            seg_end = starts[idx + 1] if idx + 1 < len(order) and starts[idx + 1] > starts[idx] else len(text)
+            seg = text[starts[idx]:seg_end]
+            pm = _TX_POS.search(seg)
+            nfl, pos = (pm.group(1), pm.group(2)) if pm else ("", "")
+            if not pos:
+                po = _TX_POS_ONLY.search(seg)
+                pos = po.group(1) if po else ("DEF" if k.startswith("team:") else "")
+            if kind == "trade":
+                action = "trade"
+            elif re.search(r"\bTo\s+(Waivers|Free Agency|FA)\b|\bDropped\b|\bReleased\b", seg, re.I):
+                action = "baja"
+            elif re.search(r"\b(Waivers?|Free Agent|Free Agency|Added)\b", seg, re.I):
+                action = "alta"
+            else:
+                action = "?"
+            bm = re.search(r"\$\s?(\d{1,3})\b", seg)
+            players.append(TxPlayer(names[k], k, pos, nfl, action, int(bm.group(1)) if bm else None))
+        # a lone "$12" for the row belongs to the player who was added
+        row_bid = re.search(r"\$\s?(\d{1,3})\b", text)
+        if row_bid and not any(p.bid is not None for p in players):
+            for p in players:
+                if p.action == "alta":
+                    p.bid = int(row_bid.group(1))
+                    break
+        # unclassified players in an add/drop row: first is the add, the rest drops
+        if kind == "add/drop" and any(p.action == "?" for p in players):
+            has_add = any(p.action == "alta" for p in players)
+            for p in players:
+                if p.action == "?":
+                    p.action = "baja" if has_add else "alta"
+                    has_add = True
+        out.append(Transaction(date.group(1).title(), int(date.group(2)), date.group(3), team_ids, kind, players,
+                               text[:300]))
+    return out
