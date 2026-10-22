@@ -22,6 +22,29 @@ MONTHS = {m: i for i, m in enumerate(["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
 STREAMED = ("K", "DEF")
 
 
+def _blank(v) -> bool:
+    """None, '' or a missing value from pandas (NaN / NA) -- the notebook passes DataFrame records."""
+    if v is None:
+        return True
+    try:
+        return v != v or str(v).strip() in ("", "nan", "NaN", "None", "<NA>")
+    except (TypeError, ValueError):  # pandas.NA refuses comparisons
+        return True
+
+
+def _clean(row: Mapping) -> dict:
+    return {k: (None if _blank(v) else v) for k, v in row.items()}
+
+
+def _num(v) -> Optional[int]:
+    if _blank(v):
+        return None
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
 def week_of(d: date, season_start: date) -> int:
     """Fantasy week of a date; `season_start` is the Tuesday before week 1."""
     return 1 + (d - season_start).days // 7
@@ -78,39 +101,41 @@ def manager_profiles(
 ) -> dict[str, ManagerProfile]:
     """Profiles from the season's moves and the weekly roster history (cell 7d).
 
-    history rows: semana, team_id, pid, jugador, puesto (BN / IR / a starting slot)."""
+    history rows: semana, team_id, pid, jugador, puesto (BN / IR / a starting slot).
+    Empty cells may come as None or as pandas NaN (a free-agent add has no bid)."""
+    history = [_clean(h) for h in history]
+    moves = [_clean(m) for m in moves]
     started = defaultdict(set)       # (team, key) -> weeks started
     for h in history:
-        if str(h.get("puesto", "BN")) in ("BN", "IR"):
+        week = _num(h.get("semana"))
+        if week is None or not h.get("team_id") or str(h.get("puesto") or "BN") in ("BN", "IR"):
             continue
-        for key in (str(h.get("pid", "")), norm_name(str(h.get("jugador", "")))):
+        for key in (str(h.get("pid") or ""), norm_name(str(h.get("jugador") or ""))):
             if key:
-                started[(str(h["team_id"]), key)].add(int(h["semana"]))
-    drops = defaultdict(list)
-    for m in moves:
-        if m["accion"] == "baja":
-            drops[(str(m["team_id"]), norm_name(m["jugador"]))].append(m["fecha"])
+                started[(str(h["team_id"]), key)].add(week)
     prof: dict[str, ManagerProfile] = {}
     for m in moves:
-        if m["accion"] != "alta" or not m["team_id"]:
+        w = _num(m.get("semana"))
+        if m.get("accion") != "alta" or not m.get("team_id") or w is None:
             continue
         tid = str(m["team_id"])
+        pos = m.get("pos") or "?"
+        bid = _num(m.get("puja"))
         p = prof.setdefault(tid, ManagerProfile(tid))
         p.adds += 1
-        p.positions[m["pos"] or "?"] += 1
-        p.last_add_week = max(p.last_add_week, int(m["semana"]))
-        if m.get("puja") is not None and m["puja"] == m["puja"]:  # not NaN
-            p.bids.append(int(m["puja"]))
-        if m["pos"] in STREAMED or int(m["semana"]) + 1 > last_week_played:
+        p.positions[pos] += 1
+        p.last_add_week = max(p.last_add_week, w)
+        if bid is not None:
+            p.bids.append(bid)
+        if pos in STREAMED or w + 1 > last_week_played:
             continue  # kickers/defenses are streamed; too recent to judge
-        w = int(m["semana"])
-        keys = [str(m.get("pid", "")), norm_name(m["jugador"])]
+        keys = [str(m.get("pid") or ""), norm_name(str(m.get("jugador") or ""))]
         weeks = set().union(*(started.get((tid, k), set()) for k in keys if k))
         used = any(w <= x <= w + 2 for x in weeks)
         p.adds_checked += 1
         if not used:
             p.unused += 1
-            p.unused_names.append(f"{m['jugador']} (sem {w}{', $' + str(int(m['puja'])) if m.get('puja') else ''})")
+            p.unused_names.append(f"{m.get('jugador')} (sem {w}{f', ${bid}' if bid else ''})")
     total_checked = sum(p.adds_checked for p in prof.values())
     league_rate = sum(p.unused for p in prof.values()) / total_checked if total_checked else 0.3
     for p in prof.values():
@@ -148,7 +173,7 @@ def claim_threats(
         for tid, p in profiles.items():
             if tid == me or current_week - p.last_add_week > 3:
                 continue
-            money = faab.get(tid)
+            money = _num(faab.get(tid))
             need = pos in set(holes.get(tid, ()))
             guess = int(round(p.high_bid if pos not in STREAMED else min(p.high_bid, 2)))
             if money is not None:

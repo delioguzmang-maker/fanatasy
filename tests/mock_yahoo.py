@@ -53,11 +53,15 @@ class MockYahoo:
             f"/f1/{LEAGUE}/settings": (FIXTURES / "settings_page.html").read_text(),
             f"/f1/{LEAGUE}/players": (FIXTURES / "players_page.html").read_text(),
             f"/f1/{LEAGUE}/4": (FIXTURES / "opponent_page.html").read_text(),
+            f"/f1/{LEAGUE}/1": (FIXTURES / "opponent_page.html").read_text(),  # third team on /teams
             f"/f1/{LEAGUE}/transactions": "<html><body><table>"
             "<tr><td><a href='https://sports.yahoo.com/nfl/players/1'>Josh Downs</a> IND - WR Waiver $11</td>"
             f"<td><a href='/f1/{LEAGUE}/4'>Rival FC</a> Sep 23, 3:10 am</td></tr>"
             "<tr><td><a href='https://sports.yahoo.com/nfl/teams/kc'>Kansas City</a> KC - DEF Waiver $12</td>"
             f"<td><a href='/f1/{LEAGUE}/4'>Rival FC</a> Sep 23, 3:10 am</td></tr>"
+            # a free-agent add has no bid: pandas turns that empty bid into NaN (cell 6c crashed on it)
+            "<tr><td><a href='https://sports.yahoo.com/nfl/players/40600'>Braelon Allen</a> NYJ - RB Free Agent</td>"
+            f"<td><a href='/f1/{LEAGUE}/{TEAM}'>Mi Equipo</a> Sep 9, 9:02 pm</td></tr>"
             "</table></body></html>",
         }
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())

@@ -66,8 +66,11 @@ def test_notebook_cells_run_against_mock(tmp_path, monkeypatch, capsys):
         ns = {"cfg": cfg, "display": print}
         exec(compile(cell("#@title 3. Conectar"), "cell3", "exec"), ns)
         ns["pilot"].now_fn = lambda: FRIDAY                   # before week 3's games
+        # every analysis cell; 7d and 7e are left out on purpose: 7d needs Yahoo's real past-week
+        # pages (the mock serves the same page for every week) and 7e needs Sleeper
         for prefix in ("#@title 3b.", "#@title 4. Alineaci", "#@title 4b.", "#@title 5. Tu rival",
-                       "#@title 5b.", "#@title 6. Waivers", "#@title 7. Evaluar"):
+                       "#@title 5b.", "#@title 5c.", "#@title 6. Waivers", "#@title 6c.", "#@title 6d.",
+                       "#@title 6e.", "# ===== CELDA 7c", "#@title 7. Evaluar"):
             exec(compile(cell(prefix), prefix, "exec"), ns)
     out = capsys.readouterr().out
     assert "Semana 3" in out
@@ -78,4 +81,5 @@ def test_notebook_cells_run_against_mock(tmp_path, monkeypatch, capsys):
     assert "Waivers semana 3" in out
     assert "NEUTRAL" in out
     assert "Posición por posición" in out
+    assert "CÓMO JUEGA CADA MANAGER" in out   # cell 6c got past the manager profiles
     assert not mock.posts  # default mode "sugerir" never writes
