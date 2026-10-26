@@ -271,3 +271,101 @@ def bench_report(dead, upgrades) -> str:
     if dead and not upgrades:
         lines.append("  Ningún corredor, receptor o ala cerrada libre le da más valor a ese lugar ahora mismo.")
     return "\n".join(lines)
+
+
+def _who(p) -> str:
+    own = f" (Yahoo {p.yahoo_proj:.1f})" if getattr(p, "yahoo_proj", None) is not None else ""
+    return f"{p.name} {p.expected:.1f}{own}"
+
+
+def win_week_report(d: dict) -> str:
+    """Moves for this week's game (see Autopilot.win_week)."""
+    src = "proyección propia" if d.get("own") else "proyección de Yahoo"
+    lines = [f"Semana {d['week']} vs {d['opp_name']} ({src}):",
+             f"  Hoy: tú {d['my_ev']:.1f} ± {d['my_sd']:.0f} · rival {d['opp_ev']:.1f} ± {d['opp_sd']:.0f}"
+             f" → {_pct(d['wp'])} de ganar"]
+    for who, byes in (("Tus", d["my_byes"]), ("Sus", d["opp_byes"])):
+        if byes:
+            lines.append(f"  {who} jugadores en descanso: " + ", ".join(f"{p.name} ({p.position})" for p in byes))
+    empty = [s for s, p in zip(d["slots"], d["lineup"]) if p is None or p.expected <= 0]
+    if empty:
+        lines.append("  ⚠ Puestos sin nadie que juegue: " + ", ".join(empty))
+    if not d["options"]:
+        lines.append("Ningún agente libre sube tu probabilidad de ganar lo suficiente: no cambies nada.")
+        return "\n".join(lines)
+    for i, o in enumerate(d["options"], 1):
+        head = "MEJOR PLAN" if i == 1 else f"Alternativa {i - 1}"
+        lines.append(f"{head}: {_pct(d['wp'])} → {_pct(o['wp'])} de ganar "
+                     f"(alineación {o['ev']:.1f}, {o['ev'] - d['my_ev']:+.1f} esta semana; "
+                     f"resto de temporada {o['ros']:+.1f} pts)")
+        drops = o["drops"] + [None] * (len(o["adds"]) - len(o["drops"]))
+        for a, dr, (bid, why) in zip(o["adds"], drops, o["bids"]):
+            how = (f"puja ${bid} (waivers {a.owner[2:].strip('()') or ''})".replace(" ()", "")
+                   if a.owner.upper().startswith("W") else "agente libre: agrégalo YA, antes que otro")
+            out = f" — suelta a {dr.name}" if dr else " — sin soltar a nadie (tienes lugar)"
+            lines.append(f"  + {a.name} ({a.position}, {a.team}) {a.proj:.1f} pts{out} · {how}")
+        if i == 1:
+            lines.append("  Alineación con este plan:")
+            for slot, p in zip(d["slots"], o["lineup"]):
+                lines.append(f"    {slot:<6} {_who(p) if p else '(vacío)'}")
+            if o["bids"] and o["bids"][0][1]:
+                lines.append(f"  Cómo salió la puja: {o['bids'][0][1]}")
+    lines.append("Los puntos del resto de la temporada se cobran: perder 1 punto de alineación en semanas futuras "
+                 f"cuesta lo mismo que {d['rate'] * 100:.1f} puntos de % de ganar esta semana.")
+    if d["wp"] < 0.4:
+        lines.append("Llegas abajo: entre dos opciones parecidas elige la de más techo (más balones o más pases).")
+    return "\n".join(lines)
+
+
+def bye_radar_report(rows: list) -> str:
+    lines = ["Radar de descansos y huecos (tu mejor alineación de cada semana, proyección de Yahoo por semana):"]
+    for r in rows:
+        diff = r["total"] - r["normal"]
+        flag = "⚠ " if r["empty"] or diff < -8 else "  "
+        lines.append(f"{flag}Semana {r['week']}: {r['total']:.1f} pts ({diff:+.1f} contra tu semana normal)")
+        if r["off"]:
+            lines.append("    No juegan: " + ", ".join(f"{p.name} ({p.position}, {p.team})" for p in r["off"]))
+        if r["empty"]:
+            lines.append("    Puestos vacíos: " + ", ".join(r["empty"]))
+        for g, c in r["fixes"]:
+            when = "puja en waivers" if c.owner.upper().startswith("W") else "agente libre"
+            lines.append(f"    → {c.name} ({c.position}, {c.team}, {when}): +{g:.1f} esa semana")
+    lines.append("Consejo: el que cubre una semana mala se consigue barato 1–2 semanas antes; "
+                 "la misma semana lo buscan todos.")
+    return "\n".join(lines)
+
+
+def projection_exam_report(d: dict) -> str:
+    ex = d["exam"]
+    lines = [f"EXAMEN de la proyección propia (semanas pasadas de tu liga, {d['rows']} jugador-semanas leídas).",
+             "Cada semana se predijo con un modelo entrenado SOLO con semanas anteriores, como en la vida real.",
+             f"Posiciones con proyección propia: {', '.join(d['positions'])} (K y DEF siguen con Yahoo).",
+             "Semana | jugadores | error Yahoo | error propia | (toda la NFL: Sleeper → propia)"]
+    for w in ex.weeks:
+        if w.mae_yahoo is None:
+            continue
+        lines.append(f"  S{w.week:<3} {w.n_league:>4}       {w.mae_yahoo:5.2f}        {w.mae_own_league:5.2f}"
+                     f"        ({w.mae_sleeper:.2f} → {w.mae_own:.2f}, {w.n_nfl} jugadores)")
+    if ex.yahoo is not None:
+        lines.append(f"Promedio: Yahoo {ex.yahoo:.2f} · propia {ex.own_league:.2f} pts de error por jugador "
+                     f"({(ex.own_league / ex.yahoo - 1) * 100:+.1f}%)")
+    if ex.pairs_n:
+        lines.append(f"Decisiones titular/banca (pares de la misma posición y semana, {ex.pairs_n}): "
+                     f"Yahoo acierta {_pct(ex.pairs_yahoo)} · propia {_pct(ex.pairs_own)}")
+    lu = d["lineups"]
+    if lu["perfecta"]:
+        lines.append(f"Tus alineaciones elegidas con cada proyección (puntos reales): Yahoo {lu['yahoo']:.1f} · "
+                     f"propia {lu['propia']:.1f} · perfecta (sabiendo el futuro) {lu['perfecta']:.1f}")
+    if d["bonus"]:
+        names = {"pass_td": "TD de pase", "pass_int": "intercepción", "pass_yd": "yarda de pase"}
+        lines.append("Puntuación de tu liga aprendida (sobre la de Sleeper): " +
+                     ", ".join(f"{names.get(k, k)} {v:+g}" for k, v in d["bonus"].items()))
+    if d["misses"]:
+        lines.append("Jugadores tuyos que Yahoo proyecta mal una y otra vez (el modelo ya lo toma en cuenta):")
+        lines += [f"  • {m}" for m in d["misses"]]
+    lines.append("DECISIÓN: " + ("se usa la proyección propia en alineación, rival, waivers y piloto."
+                                 if d["use"] else "la propia NO le ganó a Yahoo en tu liga: se usa Yahoo."))
+    lines.append("Límite real: un partido es en gran parte suerte. Ni sabiendo el promedio real de cada jugador "
+                 "se baja de ~5 pts de error; las mejores proyecciones ganan por décimas, y esas décimas "
+                 "se notan en muchas decisiones a lo largo de la temporada.")
+    return "\n".join(lines)

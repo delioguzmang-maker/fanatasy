@@ -41,6 +41,8 @@ TEAMS: dict[str, tuple[str, str]] = {
     "WAS": ("Washington", "Commanders"),
 }
 
+ALL_TEAMS = frozenset(TEAMS)
+
 _ALIASES = {
     "WSH": "WAS",
     "JAC": "JAX",

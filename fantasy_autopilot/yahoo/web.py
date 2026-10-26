@@ -39,7 +39,8 @@ class Page:
 class YahooWeb:
     # Seconds a page may be reused. Your team page, the league home and every save are never cached,
     # so game-day lineups and inactive swaps always see fresh data (cell 3b's old cache froze them).
-    CACHE_TTL = {"/playernote": 600, "/players": 1800, "/teams": 600, "/settings": 86400, "/transactions": 900}
+    CACHE_TTL = {"/playernote": 600, "/players": 1800, "/teams": 600, "/settings": 86400, "/transactions": 900,
+                 "/matchup": 3600}
     RETRY_999 = (30, 90, 300)   # Yahoo's "too many requests" answer: wait and retry
 
     def __init__(
@@ -136,6 +137,10 @@ class YahooWeb:
     def league_home(self, week: Optional[int] = None) -> Page:
         params = {"matchup_week": str(week), "module": "matchups"} if week else None
         return self.get("", params)
+
+    def matchup_page(self, week: int, mid1: str, mid2: str) -> Page:
+        """One game of the league: both lineups with Yahoo's projection and the real points."""
+        return self.get("/matchup", {"week": str(week), "mid1": str(mid1), "mid2": str(mid2)})
 
     def current_week(self) -> Optional[int]:
         return parse.parse_current_week(self.league_home().html)

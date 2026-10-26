@@ -36,7 +36,14 @@ class Config:
     pins_bench: list[str] = field(default_factory=list)
     use_sleeper: bool = True
     use_espn: bool = True
-    projections: str = "yahoo"            # yahoo | sleeper | blend
+    # propia = own projections (ownproj.py: Sleeper in your league's scoring + a model trained on
+    # every NFL game since last season; beat Yahoo on this league's weeks 1-7). Falls back to
+    # Yahoo for any player it cannot match.  yahoo | propia | sleeper | blend
+    projections: str = "propia"
+    sleeper_bonus: Optional[dict[str, float]] = None  # extra points per Sleeper stat; None = learn it
+    own_past_seasons: int = 1            # earlier seasons used to train the own projections
+    # K and DEF stay with Yahoo: Sleeper scores them differently (kicks by distance, points-allowed tiers)
+    own_positions: list[str] = field(default_factory=lambda: ["QB", "RB", "WR", "TE"])
     blend_weight: float = 0.5             # Sleeper share when projections == "blend"
     blend_weight_pos: dict[str, float] = field(default_factory=dict)  # per position (cell 7e); missing = 0
     blend_scale_pos: dict[str, float] = field(default_factory=dict)   # Sleeper points -> league scoring

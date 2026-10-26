@@ -18,6 +18,7 @@ class Player:
     eligible: list[str] = field(default_factory=list)  # starting slots the player can fill
     slot: str = "BN"              # current Yahoo slot (QB, RB, W/R/T, BN, IR, ...)
     proj: float = 0.0             # projected fantasy points for the target week (league scoring)
+    yahoo_proj: Optional[float] = None  # Yahoo's projection when `proj` is the own projection
     status: str = ""              # canonical injury status, "" when healthy
     locked: bool = False          # game started (or Yahoo disabled the slot) -> cannot move
     ir_eligible: bool = False     # Yahoo offers the IR slot for this player

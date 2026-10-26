@@ -2,7 +2,15 @@
 
 Un "Yahoo Fantasy Plus + FantasyPros Auto-Pilot" propio que corre en **Google Colab** (y, si quieres, 24/7 gratis en GitHub Actions):
 
-- **Alineación óptima** cada semana, con las proyecciones de tu propia página de Yahoo.
+- **Proyección propia**: Sleeper convertido a la puntuación de tu liga y corregido por un modelo (ridge) entrenado con
+  cada partido de la NFL desde la temporada pasada (forma contra su proyección, snaps, targets, acarreos, puntos que
+  permite el rival, línea de apuestas). Examen semana por semana sin ver el futuro: en las semanas 1–7 de la liga
+  se equivocó 4.76 pts por jugador contra 4.98 de Yahoo y ordenó mejor titular/banca (71% vs 69%). K y DEF siguen
+  con Yahoo. Si en tu liga no le gana a Yahoo, se usa Yahoo (`ownproj.py`, celda 7e).
+- **Alineación óptima** cada semana, con esa proyección.
+- **Ganar la semana** (`win_week`, celda 5d): altas, bajas y pujas que más suben tu probabilidad de ganar el próximo
+  partido (descansos, lesiones), cobrando lo que cuestan en el resto de la temporada; **radar de descansos**
+  (`bye_radar`, celda 5e).
 - **Cambios automáticos antes de cada partido**: si un titular sale *Out*/inactivo, entra el mejor suplente que todavía no haya jugado.
 - **Jugadores dudosos (Q/D) con números**: probabilidad de que jueguen, y si hay un suplente que juegue igual o más tarde para cubrirlos (el caso Nacua de la Semana 2).
 - **Waivers y pujas FAAB**: a quién agregar, a quién soltar y cuánto pujar; puede enviar los reclamos solo.

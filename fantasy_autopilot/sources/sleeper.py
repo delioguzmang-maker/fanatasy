@@ -23,6 +23,7 @@ TRENDING_URL = "https://api.sleeper.app/v1/players/nfl/trending/add"
 PROJECTIONS_URL = "https://api.sleeper.com/projections/nfl/{season}/{week}"
 STATS_URL = "https://api.sleeper.com/stats/nfl/{season}/{week}"
 POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
+ROWS_TTL = 1800   # seconds a week still in play is reused (finished weeks never change)
 
 
 class Sleeper:
@@ -34,6 +35,7 @@ class Sleeper:
         self.max_age_hours = 12.0   # the engine lowers it to 20 minutes on game days
         self._by_yahoo: Optional[dict[str, dict[str, Any]]] = None
         self._by_name: Optional[dict[tuple[str, str], dict[str, Any]]] = None
+        self._rows: dict[tuple[str, int, int], tuple[float, list[dict[str, Any]]]] = {}
 
     def _get(self, url: str, params: Any = None, timeout: int = 30) -> Any:
         resp = self.session.get(url, params=params, timeout=timeout)
@@ -88,18 +90,38 @@ class Sleeper:
         key = norm_name(name)
         return self._by_name.get((key, norm_team(team))) or self._by_name.get((key, ""))
 
-    def projections(self, season: int, week: int, reception_points: float = 1.0) -> dict[str, float]:
-        """Projected fantasy points by Sleeper player id for one week."""
-        field = "pts_ppr" if reception_points >= 1 else "pts_half_ppr" if reception_points > 0 else "pts_std"
-        params = [("season_type", "regular")] + [("position[]", p) for p in POSITIONS]
-        rows = self._get(PROJECTIONS_URL.format(season=season, week=week), params=params, timeout=60)
+    def projections(self, season: int, week: int, reception_points: float = 1.0,
+                    bonus: Optional[dict[str, float]] = None) -> dict[str, float]:
+        """Projected fantasy points by Sleeper player id for one week (league scoring, see league_points)."""
         out: dict[str, float] = {}
-        for row in rows if isinstance(rows, list) else []:
-            stats = row.get("stats") or {}
+        for row in self.rows("projections", season, week):
             pid = str(row.get("player_id", ""))
-            if pid and field in stats:
-                out[pid] = float(stats[field] or 0.0)
+            pts = league_points(row.get("stats") or {}, reception_points, bonus)
+            if pid and pts is not None:
+                out[pid] = pts
         return out
+
+    def rows(self, kind: str, season: int, week: int, final: bool = False) -> list[dict[str, Any]]:
+        """Rows of Sleeper's projections or stats ("projections" / "stats") for one week, every
+        position, with the player's name and team (only the fields this package uses).
+        `final` = the week is over: kept on disk, it does not change."""
+        key = (kind, season, week)
+        hit = self._rows.get(key)
+        if hit and (final or time.time() - hit[0] < ROWS_TTL):
+            return hit[1]
+        cache = self.cache_dir / f"{kind}_{season}_{week}.json" if self.cache_dir and final else None
+        if cache and cache.exists():
+            self._rows[key] = (time.time(), json.loads(cache.read_text()))
+            return self._rows[key][1]
+        url = (PROJECTIONS_URL if kind == "projections" else STATS_URL).format(season=season, week=week)
+        params = [("season_type", "regular")] + [("position[]", p) for p in POSITIONS]
+        data = self._get(url, params=params, timeout=90)
+        rows = [compact_row(r) for r in data] if isinstance(data, list) else []
+        if cache and rows:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(rows))
+        self._rows[key] = (time.time(), rows)
+        return rows
 
     def weekly_stats(self, season: int, week: int) -> dict[str, dict[str, Any]]:
         """Real stats of one played week by Sleeper player id (snaps, carries, targets...).
@@ -125,6 +147,41 @@ class Sleeper:
 
     def trending_adds(self, hours: int = 24, limit: int = 40) -> list[dict[str, Any]]:
         return self._get(TRENDING_URL, params={"lookback_hours": hours, "limit": limit})
+
+
+def league_points(stats: dict[str, Any], reception_points: float = 1.0,
+                  bonus: Optional[dict[str, float]] = None) -> Optional[float]:
+    """Sleeper's points in a league's scoring: its PPR / half / standard total plus `bonus`
+    points per unit of a stat. Sleeper counts 4 per passing touchdown and -1 per interception;
+    a league with 6 and -2 is bonus={"pass_td": 2, "pass_int": -1}."""
+    field = "pts_ppr" if reception_points >= 1 else "pts_half_ppr" if reception_points > 0 else "pts_std"
+    if field not in stats:
+        return None
+    pts = float(stats[field] or 0.0)
+    for stat, extra in (bonus or {}).items():
+        pts += extra * float(stats.get(stat) or 0.0)
+    return round(pts, 2)
+
+
+KEEP_STATS = ("pts_ppr", "pts_half_ppr", "pts_std", "pass_att", "pass_td", "pass_int", "pass_yd", "rec",
+              "rec_tgt", "rush_att", "off_snp", "tm_off_snp", "gp", "gms_active")
+
+
+def compact_row(r: dict[str, Any]) -> dict[str, Any]:
+    p = r.get("player") or {}
+    st = r.get("stats") or {}
+    return {"player_id": r.get("player_id"), "team": r.get("team"), "opponent": r.get("opponent"),
+            "player": {k: p.get(k) for k in ("first_name", "last_name", "position")},
+            "stats": {k: st[k] for k in KEEP_STATS if k in st}}
+
+
+def row_key(row: dict[str, Any]) -> tuple[str, str]:
+    """(position, name) of a projections/stats row; defenses go by team ("DEF", "CLE")."""
+    p = row.get("player") or {}
+    pos = p.get("position") or ""
+    if pos == "DEF":
+        return pos, norm_team(row.get("team") or p.get("team") or row.get("player_id") or "")
+    return pos, norm_name(f"{p.get('first_name', '')} {p.get('last_name', '')}")
 
 
 def injury_fields(p: dict[str, Any]) -> dict[str, Any]:

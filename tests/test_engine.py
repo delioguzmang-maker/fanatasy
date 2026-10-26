@@ -203,3 +203,89 @@ def test_preview_next_opponent(tmp_path):
         assert len(pv["slots"]) == 9
         assert "Posición por posición" in res.text and "Estrategia" in res.text
         assert 0 < pv["win_probability"] < 1
+
+
+# ------------------------------------------------- win the week, byes, own projections
+def _no_sf(week_with_bye=None):
+    from fantasy_autopilot.models import Game as G
+    no_sf = [g for g in GAMES if "SF" not in (g.home, g.away)] + [G("LV", "ARI", FOUR_25)]
+    return lambda season, week: no_sf if week_with_bye in (None, week) else GAMES
+
+
+def test_win_week_streams_a_qb_when_the_starter_is_on_bye(tmp_path):
+    with MockYahoo() as mock:
+        ap = pilot(mock, tmp_path)
+        ap.games_fetcher = _no_sf()                       # Purdy (SF) on bye, Brissett (ARI) plays
+        res = ap.win_week(week=3)
+        best = res.data["options"][0]
+        assert [a.name for a in best["adds"]] == ["Jacoby Brissett"]
+        assert [d.name for d in best["drops"]] == ["Daniel Jones"]     # a third QB is not kept
+        assert best["wp"] > res.data["wp"]
+        assert "Brock Purdy (QB)" in res.text and "agrégalo YA" in res.text
+        assert not mock.posts and not mock.claims                     # it only suggests
+
+
+def test_win_week_ignores_a_free_agent_whose_team_is_on_bye(tmp_path):
+    with MockYahoo() as mock:
+        ap = pilot(mock, tmp_path)
+        ap.games_fetcher = lambda season, week: [g for g in GAMES if "SF" not in (g.home, g.away)]  # ARI too
+        res = ap.win_week(week=3)
+        assert all("Jacoby Brissett" not in [a.name for a in o["adds"]] for o in res.data["options"])
+
+
+def test_bye_radar_flags_the_week_a_starter_is_off(tmp_path):
+    with MockYahoo() as mock:
+        ap = pilot(mock, tmp_path)
+        ap.games_fetcher = _no_sf(week_with_bye=4)
+        res = ap.bye_radar(weeks_ahead=3, week=3)
+        weeks = {r["week"]: r for r in res.data["weeks"]}
+        assert [p.name for p in weeks[4]["off"]] == ["Brock Purdy"]
+        assert weeks[4]["total"] < weeks[5]["total"]
+        assert "Semana 4" in res.text and "No juegan: Brock Purdy (QB, SF)" in res.text
+
+
+def test_own_projections_replace_yahoo_for_skill_players(tmp_path):
+    from synth import SynthSleeper
+
+    with MockYahoo() as mock:
+        ap = pilot(mock, tmp_path, sleeper=SynthSleeper(), sleeper_bonus={})
+        ap.lines_fetcher = lambda: ""
+        roster = ap.load_roster(3)
+        ap.enrich(roster.players, 3)
+        by = {p.name: p for p in roster.players}
+        assert by["Brock Purdy"].yahoo_proj == 23.66 and by["Brock Purdy"].proj != 23.66
+        assert by["Daniel Jones"].yahoo_proj is not None
+        assert by["Cameron Dicker"].yahoo_proj is None              # kickers keep Yahoo's number
+        own = ap.own_projections(3)
+        assert by["Brock Purdy"].proj == own[("QB", "brock purdy")]
+
+
+def test_own_projections_fall_back_to_yahoo_without_sleeper_rows(tmp_path):
+    with MockYahoo() as mock:
+        ap = pilot(mock, tmp_path)                      # FakeSleeper: no weekly rows
+        roster = ap.load_roster(3)
+        ap.enrich(roster.players, 3)
+        assert all(p.yahoo_proj is None for p in roster.players)
+
+
+def test_past_weeks_read_matchup_pages_and_the_exam_uses_them(tmp_path):
+    from pathlib import Path
+
+    from synth import SynthSleeper
+
+    page = (Path(__file__).parent / "fixtures" / "matchup_page.html").read_text()
+    with MockYahoo() as mock:
+        mock.pages[f"/f1/{LEAGUE}/matchup"] = page
+        ap = pilot(mock, tmp_path, sleeper=SynthSleeper(), sleeper_bonus={})
+        ap.lines_fetcher = lambda: ""
+        rows = ap.past_weeks()
+        assert {r.week for r in rows} == {1, 2}
+        assert all(r.team_id for r in rows)
+        assert any(g.startswith(f"/f1/{LEAGUE}/matchup?") for g in mock.gets)
+        assert (tmp_path / "historial_matchups.json").exists()
+        res = ap.projection_exam(rows=rows)
+        assert "EXAMEN de la proyección propia" in res.text
+        assert res.data["exam"].weeks and res.data["exam"].yahoo is not None
+        assert ap.state.data["own_projection_ok"] is res.data["use"]
+        if not res.data["use"]:
+            assert ap.own_projections(3) == {}          # lost the exam: Yahoo until it wins again

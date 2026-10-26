@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import csv
 import io
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 import requests
@@ -48,8 +49,37 @@ def parse_games_csv(text: str, season: int, week: int, now: Optional[datetime] =
     return games
 
 
-def week_games(season: int, week: int, session: Optional[requests.Session] = None) -> list[Game]:
+def implied_totals(text: str, seasons: Iterable[int]) -> dict[tuple[int, int, str], float]:
+    """Points the betting market expects each team to score: {(season, week, team): points}.
+    nflverse's spread_line is in favor of the home team (positive = home favored)."""
+    wanted = {str(s) for s in seasons}
+    out: dict[tuple[int, int, str], float] = {}
+    for row in csv.DictReader(io.StringIO(text)):
+        if row.get("season") not in wanted or row.get("game_type", "REG") != "REG":
+            continue
+        try:
+            total, spread = float(row["total_line"]), float(row["spread_line"])
+            key = (int(row["season"]), int(row["week"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        out[key + (norm_team(row.get("home_team")),)] = (total + spread) / 2
+        out[key + (norm_team(row.get("away_team")),)] = (total - spread) / 2
+    return out
+
+
+_CSV: dict[str, object] = {"at": 0.0, "text": ""}
+
+
+def games_csv(session: Optional[requests.Session] = None, max_age: float = 3600) -> str:
+    """The whole schedule file (2 MB), downloaded at most once an hour."""
+    if _CSV["text"] and time.time() - float(_CSV["at"]) < max_age:
+        return str(_CSV["text"])
     session = session or make_session()
     resp = session.get(GAMES_CSV, timeout=60)
     resp.raise_for_status()
-    return parse_games_csv(resp.text, season, week)
+    _CSV.update(at=time.time(), text=resp.text)
+    return resp.text
+
+
+def week_games(season: int, week: int, session: Optional[requests.Session] = None) -> list[Game]:
+    return parse_games_csv(games_csv(session), season, week)
