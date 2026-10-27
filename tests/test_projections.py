@@ -161,3 +161,17 @@ def test_rows_from_cell_7d_history():
     ])
     assert (rows[0].week, rows[0].team, rows[0].status, rows[0].team_id, rows[0].usable) == (7, "IND", "", "13", True)
     assert rows[1].slot == "W/R/T" and rows[1].pts is None and not rows[1].usable
+
+
+def test_questionable_split_accepts_sleeper_rows_as_a_list():
+    from fantasy_autopilot import calibration
+
+    as_dict = {7: {"4034": {"off_snp": 50, "rush_att": 10, "rec_tgt": 2}}}
+    as_list = {7: [{"player_id": "4034", "stats": {"off_snp": 50, "rush_att": 10, "rec_tgt": 2}}]}
+    assert calibration.questionable_split([], {}, as_list) == calibration.questionable_split([], {}, as_dict)
+
+
+def test_build_info_names_the_version():
+    import fantasy_autopilot
+
+    assert fantasy_autopilot.build_info().startswith(fantasy_autopilot.__version__.split(".")[0])

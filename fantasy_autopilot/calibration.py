@@ -168,6 +168,12 @@ def questionable_split(
     def played(st):
         return bool(st) and bool(st.get("off_snp") or st.get("gp") or touches(st) > 0)
 
+    def by_player(rows):   # Sleeper's raw list of rows also works: {player_id: stats}
+        if isinstance(rows, Mapping):
+            return rows
+        return {str(r.get("player_id")): r.get("stats") or {} for r in rows or () if isinstance(r, Mapping)}
+
+    stats = {w: by_player(rows) for w, rows in stats.items()}
     usual: dict[str, list[float]] = {}
     for w, by_id in stats.items():
         for sid, st in by_id.items():

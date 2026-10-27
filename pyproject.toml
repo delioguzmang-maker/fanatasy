@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fantasy-autopilot"
-version = "0.1.0"
+version = "0.2.1"
 description = "Autopilot for Yahoo Fantasy Football: lineup optimizer, game-day inactive swaps, waivers and FAAB bids, matchup and trade analysis. Runs in Google Colab."
 readme = "README.md"
 requires-python = ">=3.10"
