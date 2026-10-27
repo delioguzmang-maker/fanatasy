@@ -289,3 +289,26 @@ def test_past_weeks_read_matchup_pages_and_the_exam_uses_them(tmp_path):
         assert ap.state.data["own_projection_ok"] is res.data["use"]
         if not res.data["use"]:
             assert ap.own_projections(3) == {}          # lost the exam: Yahoo until it wins again
+
+
+def test_projection_exam_prefers_cell_7d_history(tmp_path):
+    import csv
+
+    from synth import SynthSleeper
+
+    sleeper = SynthSleeper()
+    with open(tmp_path / "historial_proyecciones.csv", "w", newline="") as fh:
+        w = csv.DictWriter(fh, ["semana", "team_id", "jugador", "pos", "puesto", "proy", "real", "nfl", "estado"])
+        w.writeheader()
+        for week in (1, 2, 3):
+            for first, last, pos, team in sleeper.players[:10]:
+                real = next(r for r in sleeper.rows("stats", 2026, week)
+                            if r["player"]["last_name"] == last)["stats"]["pts_ppr"]
+                w.writerow({"semana": week, "team_id": TEAM, "jugador": f"{first} {last}", "pos": pos, "puesto": pos,
+                            "proy": 12.0, "real": real, "nfl": team, "estado": ""})
+    with MockYahoo() as mock:
+        ap = pilot(mock, tmp_path, sleeper=sleeper, sleeper_bonus={})
+        ap.lines_fetcher = lambda: ""
+        res = ap.projection_exam()
+        assert not any("/matchup" in g for g in mock.gets)       # no pages needed
+        assert res.data["rows"] == 30 and res.data["exam"].yahoo is not None

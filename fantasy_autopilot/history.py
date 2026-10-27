@@ -15,9 +15,12 @@ Row layout on that page (left team | slot | right team):
 
 from __future__ import annotations
 
+import csv
+import math
 import re
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Optional
 
 from bs4 import BeautifulSoup
 
@@ -152,3 +155,40 @@ def dedupe(rows: Iterable[PastRow]) -> list[PastRow]:
             seen.add(key)
             out.append(r)
     return out
+
+
+def _text(v: Any) -> str:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return ""
+    return str(v).strip()
+
+
+def _float(v: Any) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(f) else f
+
+
+def from_records(records: Iterable[Mapping[str, Any]]) -> list[PastRow]:
+    """Rows saved by notebook cell 7d (historial_proyecciones.csv: Yahoo's projection and the real
+    points of every player of every team, read from the team pages of finished weeks)."""
+    out = []
+    for r in records:
+        week, proj, pts = _float(r.get("semana")), _float(r.get("proy")), _float(r.get("real"))
+        pos = _text(r.get("pos"))
+        if week is None or not pos:
+            continue
+        out.append(PastRow(int(week), "", norm_slot(_text(r.get("puesto"))) or "BN", _text(r.get("jugador")),
+                           norm_team(_text(r.get("nfl"))), pos, _text(r.get("estado")), proj, pts,
+                           team_id=_text(r.get("team_id"))))
+    return out
+
+
+def read_7d_csv(path: Path) -> list[PastRow]:
+    try:
+        with open(path, newline="") as fh:
+            return from_records(csv.DictReader(fh))
+    except OSError:
+        return []

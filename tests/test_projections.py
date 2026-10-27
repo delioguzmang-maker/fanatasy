@@ -101,3 +101,63 @@ def test_add_model_sees_streamers_and_busy_managers_the_bye_rule_misses():
     probs = adds.predict(nxt, 10)
     assert set(probs) == {str(i) for i in range(1, 13)}
     assert all(0 <= v <= 1 for d in probs.values() for v in d.values())
+
+
+class _Resp:
+    def __init__(self, data):
+        self.data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self.data
+
+
+class _Session:
+    def __init__(self, data):
+        self.data, self.calls = data, 0
+
+    def get(self, url, params=None, timeout=None):
+        self.calls += 1
+        return _Resp(self.data)
+
+
+SLEEPER_ROWS = [{"player_id": "4034", "team": "SF", "opponent": "ATL",
+                 "player": {"first_name": "Brock", "last_name": "Purdy", "position": "QB"},
+                 "stats": {"pts_half_ppr": 14.02, "pass_td": 1, "gp": 1, "off_snp": 60, "big_extra": 1}}]
+
+
+def test_weekly_stats_and_rows_keep_separate_files_and_repair_a_wrong_one(tmp_path):
+    import json
+
+    from fantasy_autopilot.sources.sleeper import Sleeper
+
+    # the file left by the previous version: weekly_stats' name holding a list of rows
+    (tmp_path / "stats_2026_7.json").write_text(json.dumps([{"player_id": "4034"}]))
+    session = _Session(SLEEPER_ROWS)
+    sl = Sleeper(cache_dir=tmp_path, session=session)
+    stats = sl.weekly_stats(2026, 7)
+    assert stats == {"4034": SLEEPER_ROWS[0]["stats"]} and session.calls == 1     # fetched again
+    assert isinstance(json.loads((tmp_path / "stats_2026_7.json").read_text()), dict)
+    rows = sl.rows("stats", 2026, 7, final=True)
+    assert rows[0]["player"]["last_name"] == "Purdy" and "big_extra" not in rows[0]["stats"]
+    assert (tmp_path / "rows_stats_2026_7.json").exists()
+    assert sl.weekly_stats(2026, 7) == stats and session.calls == 2               # untouched by rows()
+    fresh = Sleeper(cache_dir=tmp_path, session=session)
+    assert fresh.rows("stats", 2026, 7, final=True) == rows and session.calls == 2  # read from disk
+    (tmp_path / "rows_stats_2026_8.json").write_text(json.dumps({"4034": {}}))    # wrong shape: ignored
+    assert fresh.rows("stats", 2026, 8, final=True)[0]["player_id"] == "4034" and session.calls == 3
+
+
+def test_rows_from_cell_7d_history():
+    from fantasy_autopilot.history import from_records
+
+    rows = from_records([
+        {"semana": 7, "team_id": "13", "pid": "1", "jugador": "Daniel Jones", "pos": "QB", "puesto": "BN",
+         "proy": 14.27, "real": 3.62, "nfl": "Ind", "estado": float("nan")},
+        {"semana": 7, "team_id": "4", "pid": "2", "jugador": "Saquon Barkley", "pos": "RB", "puesto": "W/R/T",
+         "proy": 13.85, "real": float("nan"), "nfl": "PHI", "estado": "Q"},
+    ])
+    assert (rows[0].week, rows[0].team, rows[0].status, rows[0].team_id, rows[0].usable) == (7, "IND", "", "13", True)
+    assert rows[1].slot == "W/R/T" and rows[1].pts is None and not rows[1].usable

@@ -109,10 +109,16 @@ class Sleeper:
         hit = self._rows.get(key)
         if hit and (final or time.time() - hit[0] < ROWS_TTL):
             return hit[1]
-        cache = self.cache_dir / f"{kind}_{season}_{week}.json" if self.cache_dir and final else None
+        # own file name: weekly_stats() keeps stats_<season>_<week>.json in another shape
+        cache = self.cache_dir / f"rows_{kind}_{season}_{week}.json" if self.cache_dir and final else None
         if cache and cache.exists():
-            self._rows[key] = (time.time(), json.loads(cache.read_text()))
-            return self._rows[key][1]
+            try:
+                cached = json.loads(cache.read_text())
+            except ValueError:
+                cached = None
+            if isinstance(cached, list) and cached and all(isinstance(r, dict) for r in cached[:5]):
+                self._rows[key] = (time.time(), cached)
+                return cached
         url = (PROJECTIONS_URL if kind == "projections" else STATS_URL).format(season=season, week=week)
         params = [("season_type", "regular")] + [("position[]", p) for p in POSITIONS]
         data = self._get(url, params=params, timeout=90)
@@ -129,7 +135,12 @@ class Sleeper:
         A finished week is cached on disk: it does not change except for small corrections."""
         cache = self.cache_dir / f"stats_{season}_{week}.json" if self.cache_dir else None
         if cache and cache.exists():
-            return json.loads(cache.read_text())
+            try:
+                cached = json.loads(cache.read_text())
+            except ValueError:
+                cached = None
+            if isinstance(cached, dict) and cached:   # (a list here is a file from another reader: fetch again)
+                return cached
         params = [("season_type", "regular")] + [("position[]", p) for p in ("QB", "RB", "WR", "TE")]
         rows = self._get(STATS_URL.format(season=season, week=week), params=params, timeout=60)
         out: dict[str, dict[str, Any]] = {}

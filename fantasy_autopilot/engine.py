@@ -1459,6 +1459,15 @@ class Autopilot:
             pass
         return rows
 
+    def history_rows(self, weeks: Optional[Sequence[int]] = None) -> list[hist_mod.PastRow]:
+        """The league's finished weeks: cell 7d's saved team pages (historial_proyecciones.csv) when
+        they exist, else the matchup pages."""
+        rows = hist_mod.read_7d_csv(self.cfg.state_path / "historial_proyecciones.csv")
+        if rows:
+            wanted = set(weeks) if weeks else None
+            return [r for r in rows if wanted is None or r.week in wanted]
+        return self.past_weeks(weeks)
+
     def projection_exam(self, weeks: Optional[Sequence[int]] = None, rows: Optional[Sequence[Any]] = None) -> RunResult:
         """Own projections vs Yahoo on the finished weeks of this league, every week predicted
         with a model trained only on earlier weeks. If the own projection loses, Yahoo is used."""
@@ -1466,7 +1475,7 @@ class Autopilot:
         if not self.sleeper or not hasattr(self.sleeper, "rows"):
             return RunResult("projection_exam", "Sin Sleeper", "La proyección propia necesita Sleeper (use_sleeper).",
                              notify=False)
-        rows = list(rows) if rows is not None else self.past_weeks(weeks)
+        rows = list(rows) if rows is not None else self.history_rows(weeks)
         if not rows:
             return RunResult("projection_exam", "Sin historial", "No pude leer semanas pasadas de la liga.", notify=False)
         model = self.own_model()
