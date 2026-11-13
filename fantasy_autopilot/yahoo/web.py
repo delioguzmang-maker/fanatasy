@@ -17,7 +17,7 @@ from ..models import WriteResult
 from ..nfl import norm_slot
 from ..sources.http import BROWSER_UA, make_session
 from . import parse
-from .cookies import CookieSource, parse_cookies
+from .cookies import COPY_HELP, CookieSource, cookie_problems, parse_cookies
 
 BASE_URL = "https://football.fantasysports.yahoo.com"
 
@@ -60,6 +60,9 @@ class YahooWeb:
         self.cookies = parse_cookies(cookies) if cookies else []
         if not self.cookies:
             raise ValueError("No se encontraron cookies de Yahoo (revisa YAHOO_COOKIES).")
+        problems = cookie_problems(self.cookies)
+        if problems:   # requests would fail later with a cryptic UnicodeEncodeError
+            raise ValueError("Cookie de Yahoo inválida: " + "; ".join(problems) + ". " + COPY_HELP)
         self.session = session or make_session(user_agent)
         # Cookies go in the jar (not a raw "Cookie" header): requests drops a
         # hand-set header when it follows a redirect, e.g. after saving a lineup.

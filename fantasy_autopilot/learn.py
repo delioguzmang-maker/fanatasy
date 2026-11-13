@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass, field
 from itertools import product
 from typing import Any, Callable, Iterable, Optional, Sequence
 
@@ -73,3 +74,42 @@ def lineup_points(rows: Sequence[PastRow], value: Callable[[PastRow], Optional[f
                       proj=value(r) or 0.0) for i, r in enumerate(rows)]
     chosen = assign(players, slots, lambda p, s: p.proj + 1e-9)
     return float(sum(rows[int(p.pid)].pts or 0.0 for p in chosen if p is not None))
+
+
+@dataclass
+class LineupComparison:
+    by_team_week: dict[tuple[str, int], dict[str, float]] = field(default_factory=dict)
+    diff: float = 0.0          # own minus Yahoo, real points, all team-weeks
+    se: float = 0.0            # how much of that luck alone explains (standard error of the total)
+    better: int = 0
+    worse: int = 0
+
+    @property
+    def same(self) -> int:
+        return len(self.by_team_week) - self.better - self.worse
+
+
+def lineup_comparison(rows_with_own: Sequence[tuple[PastRow, float]], slots: Sequence[str],
+                      team_of: Callable[[PastRow], str]) -> LineupComparison:
+    """For every team and week: the real points of the lineup Yahoo's projection picks, the one the
+    own projection picks and the best possible (knowing the results)."""
+    groups: dict[tuple[str, int], list[tuple[PastRow, float]]] = defaultdict(list)
+    for r, p in rows_with_own:
+        groups[(team_of(r), r.week)].append((r, p))
+    out = LineupComparison()
+    diffs = []
+    for key, g in sorted(groups.items()):
+        players = [r for r, _ in g]
+        own = {id(r): p for r, p in g}
+        t = {"yahoo": lineup_points(players, lambda r: r.proj, slots),
+             "own": lineup_points(players, lambda r: own[id(r)], slots),
+             "best": lineup_points(players, lambda r: r.pts, slots)}
+        out.by_team_week[key] = t
+        d = t["own"] - t["yahoo"]
+        diffs.append(d)
+        out.better += d > 0.01
+        out.worse += d < -0.01
+    if diffs:
+        out.diff = float(sum(diffs))
+        out.se = float(np.std(diffs, ddof=1) * np.sqrt(len(diffs))) if len(diffs) > 1 else 0.0
+    return out

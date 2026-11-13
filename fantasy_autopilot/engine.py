@@ -11,6 +11,7 @@ Tasks (all return a ``RunResult`` with a Spanish report):
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import importlib.util
 import json
@@ -27,6 +28,7 @@ from zoneinfo import ZoneInfo
 from . import calibration
 from . import history as hist_mod
 from . import learn
+from . import scorecard as score
 from . import ownproj
 from . import report as rpt
 from . import role as role_mod
@@ -53,7 +55,7 @@ from .optimizer import (
     plan_objective,
 )
 from .sources import espn, schedule
-from .sources.sleeper import Sleeper, injury_fields, row_key
+from .sources.sleeper import Sleeper, injury_fields, league_points, row_key
 from .status import DEFAULT_PROBS, SEVERITY, apply_status_model, is_out, norm_status
 from .trade import evaluate_trade
 from .waivers import (
@@ -406,7 +408,7 @@ class Autopilot:
         missing = any(p.proj == 0 and not p.on_bye and not is_out(p.status) and p.slot != "IR" for p in players)
         if self.cfg.projections in ("sleeper", "blend") or missing:
             self._sleeper_projections(players, week)
-        if self.cfg.projections == "propia":
+        if self.cfg.projections in ("propia", "auto"):
             self.apply_own(players, week)
         probs = dict(DEFAULT_PROBS)
         probs.update(self.cfg.status_probs)
@@ -514,10 +516,10 @@ class Autopilot:
 
     def own_projections(self, week: int) -> dict[tuple[str, str], float]:
         """{(pos, name key): own projection} for `week` ({} when Sleeper is off or fails)."""
-        if self.cfg.projections != "propia" or not self.sleeper or not hasattr(self.sleeper, "rows"):
+        if self.cfg.projections not in ("propia", "auto") or not self.sleeper or not hasattr(self.sleeper, "rows"):
             return {}
-        if self.state.data.get("own_projection_ok") is False:
-            return {}   # it lost the last exam against Yahoo (cell 7e): Yahoo until it wins again
+        if self.cfg.projections == "auto" and self.state.data.get("own_projection_ok") is not True:
+            return {}   # it has not beaten Yahoo in this league's exam (cell 7e): Yahoo
         if week not in self._own or time.time() - self._own_at.get(week, 0) > 1800:   # Sunday loop: refresh
             self._own[week] = {}
             self._own_at[week] = time.time()
@@ -1102,6 +1104,8 @@ class Autopilot:
                     writes.append(res)
                     if res.ok and not res.dry_run:
                         self.state.add_claim(week, c.add.pid)
+        if claims:
+            self._log_suggestions("waivers", week, [(c.add, c.drop, c.bid) for c in claims])
         text = rpt.claims_report(week, self.cfg.mode, claims, balance, rival_max, history, writes,
                                  ir_moves, self.warnings, f"{self.web.url('/players')}?status=A")
         text += rpt.bench_report(dead, upgrades)
@@ -1365,8 +1369,12 @@ class Autopilot:
             "opp_lineup": opp_chosen, "balance": balance, "rate": rate,
             "my_byes": [p for p in active if p.on_bye], "opp_byes": [p for p in opp_roster.players
                                                                   if p.on_bye and p.slot != "IR"],
-            "own": self.cfg.projections == "propia" and bool(self._own.get(week)),
+            "own": bool(self._own.get(week)),
         }
+        if best:
+            o = best[0]
+            drops = o["drops"] + [None] * (len(o["adds"]) - len(o["drops"]))
+            self._log_suggestions("ganar", week, [(a, d, bid) for a, d, (bid, _) in zip(o["adds"], drops, o["bids"])])
         text = rpt.win_week_report(data)
         if self.warnings:
             text += "\nAvisos:\n" + "\n".join(f"  ⚠ {w}" for w in self.warnings)
@@ -1481,28 +1489,121 @@ class Autopilot:
         model = self.own_model()
         through = max(r.week for r in rows)
         ex = model.exam(through, rows)
-        mine = [(r, p) for r, p in ex.rows if r.team_id == self.cfg.team_id] or [
-            (r, p) for r, p in ex.rows if not r.team_id and r.side == "left"]
-        lineups = {"yahoo": 0.0, "propia": 0.0, "perfecta": 0.0}
-        for w in sorted({r.week for r, _ in mine}):
-            g = [(r, p) for r, p in mine if r.week == w]
-            own = {id(r): p for r, p in g}
-            lineups["yahoo"] += learn.lineup_points([r for r, _ in g], lambda r: r.proj, self.cfg_slots())
-            lineups["propia"] += learn.lineup_points([r for r, _ in g], lambda r: own[id(r)], self.cfg_slots())
-            lineups["perfecta"] += learn.lineup_points([r for r, _ in g], lambda r: r.pts, self.cfg_slots())
+        league = learn.lineup_comparison(ex.rows, self.cfg_slots(),
+                                         team_of=lambda r: r.team_id or r.side)
+        mine = [t for k, t in league.by_team_week.items() if k[0] == self.cfg.team_id] or [
+            t for k, t in league.by_team_week.items() if k[0] == "left"]
+        lineups = {"yahoo": sum(t["yahoo"] for t in mine), "propia": sum(t["own"] for t in mine),
+                   "perfecta": sum(t["best"] for t in mine)}
         misses = learn.chronic_misses(rows, lambda r: r.team_id == self.cfg.team_id or (not r.team_id and r.side == "left"))
-        use = bool(ex.beats_yahoo)
+        mae_gain = (1 - ex.own_league / ex.yahoo) if ex.yahoo and ex.own_league is not None else 0.0
+        # both measures, with margin: per-player error at least 1% lower AND the lineups it picks score
+        # more than Yahoo's by more than the luck of those weeks (one standard error)
+        use = bool(mae_gain >= 0.01 and league.diff > max(0.0, league.se))
         self.state.data["own_projection_ok"] = use
         self.state.save()
         self._own.clear()
-        data = {"exam": ex, "lineups": lineups, "misses": misses, "bonus": self.scoring_bonus(), "use": use,
-                "positions": list(self.cfg.own_positions), "rows": len(rows)}
+        data = {"exam": ex, "lineups": lineups, "league": league, "mae_gain": mae_gain, "misses": misses,
+                "bonus": self.scoring_bonus(), "use": use, "positions": list(self.cfg.own_positions), "rows": len(rows),
+                "mode": self.cfg.projections}
         text = rpt.projection_exam_report(data)
         if self.warnings:
             text += "\nAvisos:\n" + "\n".join(f"  ⚠ {w}" for w in self.warnings)
         title = (f"Proyección propia: error {ex.own_league:.2f} vs Yahoo {ex.yahoo:.2f}"
                  if ex.yahoo is not None and ex.own_league is not None else "Proyección propia: sin examen")
         return RunResult("projection_exam", title, text, notify=False, data=data)
+
+    # ------------------------------------------------ were the suggestions good?
+    def _log_suggestions(self, kind: str, week: int, moves: Sequence[tuple[Player, Optional[Player], int]]) -> None:
+        self.state.log_decision(self.cfg.state_path / "decisiones_log.jsonl", {
+            "time": self.now_fn().isoformat(timespec="minutes"), "week": week, "tipo": kind, "mode": self.cfg.mode,
+            "sugerencias": [{"add": a.name, "add_pos": a.position, "drop": d.name if d else None,
+                             "drop_pos": d.position if d else None, "bid": int(bid or 0)} for a, d, bid in moves],
+        })
+
+    def real_points(self, weeks: Sequence[int]) -> tuple[score.Points, dict[str, str]]:
+        """Points really scored, by (week, player): Yahoo's own where cell 7d saved them, otherwise
+        Sleeper's stats in the league's scoring. Also each player's position (by name key)."""
+        yahoo: dict[tuple[int, str], float] = {}
+        pos: dict[str, str] = {}
+        for r in hist_mod.read_7d_csv(self.cfg.state_path / "historial_proyecciones.csv"):
+            key = score.name_key(r.name, r.pos)
+            pos.setdefault(key, r.pos)
+            if r.pts is not None:
+                yahoo[(r.week, key)] = r.pts
+        sleeper: dict[tuple[int, str], float] = {}
+        if self.sleeper and hasattr(self.sleeper, "rows"):
+            current = self.week()
+            for w in sorted(set(weeks)):
+                try:
+                    rows = self.sleeper.rows("stats", self.season(), w, final=w < current)
+                except Exception as exc:  # noqa: BLE001
+                    self.warnings.append(f"sin estadísticas de Sleeper de la semana {w}: {exc}")
+                    continue
+                for row in rows:
+                    p, k = row_key(row)
+                    key = f"DEF:{k}" if p == "DEF" else k
+                    v = league_points(row.get("stats") or {}, self.reception_points(), self.scoring_bonus())
+                    if v is not None and k:
+                        sleeper[(w, key)] = v
+                        pos.setdefault(key, p)
+
+        def points(week: int, name: str, position: str = "") -> Optional[float]:
+            key = score.name_key(name, position or pos.get(score.name_key(name), ""))
+            return yahoo.get((week, key), sleeper.get((week, key)))
+
+        return points, pos
+
+    def scorecard(self) -> RunResult:
+        """Every suggestion checked against the points really scored: lineups, trades, adds, claims."""
+        self.warnings = []
+        last = self._target_week() - 1          # last week whose games are over
+        path = self.cfg.state_path / "decisiones_log.jsonl"
+        decisions = []
+        try:
+            for line in path.read_text().splitlines():
+                try:
+                    decisions.append(json.loads(line))
+                except ValueError:
+                    continue
+        except OSError:
+            pass
+        moves = []
+        try:
+            with open(self.cfg.state_path / "movimientos_liga.csv", newline="") as fh:
+                moves = list(csv.DictReader(fh))
+        except OSError:
+            pass
+        weeks = sorted({int(d["week"]) for d in decisions if d.get("week")} | set(range(1, last + 1)))
+        points, pos = self.real_points(weeks)
+        names = {n for d in decisions for n in (d.get("yahoo_now") or {})}
+        positions = {n: pos.get(score.name_key(n), "") for n in names}
+        me = str(self.cfg.team_id)
+        roster: dict[int, set[str]] = {}          # who was on your roster each week
+        for r in hist_mod.read_7d_csv(self.cfg.state_path / "historial_proyecciones.csv"):
+            if r.team_id == me:
+                roster.setdefault(r.week, set()).add(score.name_key(r.name, r.pos))
+        for d in decisions:
+            if d.get("week") and d.get("yahoo_now"):
+                roster.setdefault(int(d["week"]), set()).update(
+                    score.name_key(n, positions.get(n, "")) for n in d["yahoo_now"])
+        data = {
+            "current": last + 1,
+            "lineups": [w for w in score.lineup_weeks(decisions, points, positions) if w.week <= last + 1],
+            "trades": score.trade_checks(moves, me, points, last, roster),
+            "adds": score.add_checks(moves, me, points, last, roster),
+            "suggestions": score.suggestion_checks(decisions, points, last),
+        }
+        text = rpt.scorecard_report(data)
+        if not decisions and not moves:
+            text += ("\nTodavía no hay nada guardado: las decisiones se guardan al correr la celda 4 u 8, y los "
+                     "movimientos de la liga al correr la 6c.")
+        if self.warnings:
+            text += "\nAvisos:\n" + "\n".join(f"  ⚠ {w}" for w in self.warnings)
+        done = [w for w in data["lineups"] if w.week <= last]
+        title = ("Auditoría: seguir mis alineaciones habría dado "
+                 f"{sum(w.recommended - w.played for w in done):+.1f} pts" if done else "Auditoría de sugerencias")
+        return RunResult("scorecard", title, text, notify=False, data=data)
 
     def cfg_slots(self) -> list[str]:
         slots = self.league_settings().starting_slots

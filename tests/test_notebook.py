@@ -28,7 +28,7 @@ def test_notebook_is_valid_and_has_the_steps():
     titles = [c.splitlines()[0] for c in cells]
     assert titles[0].startswith("#@title 1. Instalar")
     for step in ("3b. Parches", "4b. Alerta de rol", "6c. Inteligencia", "6d. Lesionados", "6e. Historia",
-                 "7e. Proyección propia", "5d. Ganar la semana", "5e. Radar de descansos",
+                 "7e. Proyección propia", "7f. ¿Fueron buenas", "5d. Ganar la semana", "5e. Radar de descansos",
                  "Piloto automático del domingo"):
         assert any(step in t for t in titles), step
     assert any(c.startswith("# ===== CELDA 7d") for c in cells)
@@ -70,7 +70,7 @@ def test_notebook_cells_run_against_mock(tmp_path, monkeypatch, capsys):
         # (the mock serves the same page for every week). 7e runs without Sleeper: it must say so
         for prefix in ("#@title 3b.", "#@title 4. Alineaci", "#@title 4b.", "#@title 5. Tu rival",
                        "#@title 5b.", "#@title 5c.", "#@title 5d.", "#@title 5e.", "#@title 6. Waivers",
-                       "#@title 7e.", "#@title 6c.", "#@title 6d.",
+                       "#@title 7e.", "#@title 7f.", "#@title 6c.", "#@title 6d.",
                        "#@title 6e.", "# ===== CELDA 7c", "#@title 7. Evaluar"):
             exec(compile(cell(prefix), prefix, "exec"), ns)
     out = capsys.readouterr().out
@@ -82,6 +82,7 @@ def test_notebook_cells_run_against_mock(tmp_path, monkeypatch, capsys):
     assert "vs Rival FC (proyección de Yahoo)" in out          # 5d (no Sleeper here: Yahoo)
     assert "Radar de descansos" in out                         # 5e
     assert "La proyección propia necesita Sleeper" in out       # 7e without Sleeper
+    assert "¿FUERON BUENAS LAS SUGERENCIAS?" in out              # 7f
     assert "EXAMEN: ¿quién agrega y en qué posición?" in out or "no se puede examinar la predicción" in out
     assert "Waivers semana 3" in out
     assert "NEUTRAL" in out

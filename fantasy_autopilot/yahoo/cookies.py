@@ -107,6 +107,25 @@ def parse_cookies(source: CookieSource) -> list[dict[str, Any]]:
     return out
 
 
+def cookie_problems(cookies: list[dict[str, Any]]) -> list[str]:
+    """What is wrong with a pasted cookie, in words (names only, never values)."""
+    out = []
+    for c in cookies:
+        value = str(c.get("value", ""))
+        if "\u2026" in value or value.endswith("..."):
+            out.append(f"la cookie {c['name']} está cortada (termina en '…'): el navegador muestra los valores "
+                       "largos recortados y se copió el texto recortado")
+        elif any(ord(ch) > 255 or ch in "\r\n" for ch in value):
+            out.append(f"la cookie {c['name']} tiene caracteres que no pueden ir en una cookie (¿se pegó con otro texto?)")
+    return out
+
+
+COPY_HELP = ("Copia la cookie completa: en Chrome abre tu liga en Yahoo, F12 → pestaña Network (Red) → recarga → "
+             "clic en la primera petición a football.fantasysports.yahoo.com → Headers → Request Headers → "
+             "'cookie' → clic derecho → Copy value. No copies el texto que se ve en pantalla: se corta con '…'. "
+             "Después actualiza el secreto YAHOO_COOKIES en Colab (y en GitHub si lo usas).")
+
+
 def cookie_header(cookies: list[dict[str, Any]]) -> str:
     """Header for requests to football.fantasysports.yahoo.com."""
     yahoo = [c for c in cookies if "yahoo.com" in (c.get("domain") or YAHOO_DOMAIN)]

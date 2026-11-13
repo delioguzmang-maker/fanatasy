@@ -352,6 +352,11 @@ def projection_exam_report(d: dict) -> str:
     if ex.pairs_n:
         lines.append(f"Decisiones titular/banca (pares de la misma posición y semana, {ex.pairs_n}): "
                      f"Yahoo acierta {_pct(ex.pairs_yahoo)} · propia {_pct(ex.pairs_own)}")
+    lg = d.get("league")
+    if lg is not None and lg.by_team_week:
+        lines.append(f"LO QUE DECIDE PARTIDOS: la alineación que cada proyección habría elegido, en las "
+                     f"{len(lg.by_team_week)} semanas-equipo de la liga (puntos reales): propia {lg.diff:+.1f} contra "
+                     f"Yahoo (±{lg.se:.0f} de pura suerte); mejor en {lg.better}, peor en {lg.worse}, igual en {lg.same}.")
     lu = d["lineups"]
     if lu["perfecta"]:
         lines.append(f"Tus alineaciones elegidas con cada proyección (puntos reales): Yahoo {lu['yahoo']:.1f} · "
@@ -363,9 +368,58 @@ def projection_exam_report(d: dict) -> str:
     if d["misses"]:
         lines.append("Jugadores tuyos que Yahoo proyecta mal una y otra vez (el modelo ya lo toma en cuenta):")
         lines += [f"  • {m}" for m in d["misses"]]
-    lines.append("DECISIÓN: " + ("se usa la proyección propia en alineación, rival, waivers y piloto."
-                                 if d["use"] else "la propia NO le ganó a Yahoo en tu liga: se usa Yahoo."))
+    lines.append("REGLA: la propia se usa solo si baja el error al menos 1% Y sus alineaciones suman más que Yahoo "
+                 "por encima de la suerte.")
+    if d["use"]:
+        lines.append("DECISIÓN: le gana a Yahoo en las dos cosas: se usa la proyección propia en alineación, rival, "
+                     "waivers y piloto.")
+    else:
+        lines.append(f"DECISIÓN: no le gana a Yahoo con claridad (error {d.get('mae_gain', 0) * 100:+.1f}% mejor, "
+                     "alineaciones dentro de la suerte): se usa Yahoo"
+                     + (" (tu configuración dice 'propia': la propia se sigue usando igual)."
+                        if d.get("mode") == "propia" else "."))
     lines.append("Límite real: un partido es en gran parte suerte. Ni sabiendo el promedio real de cada jugador "
                  "se baja de ~5 pts de error; las mejores proyecciones ganan por décimas, y esas décimas "
                  "se notan en muchas decisiones a lo largo de la temporada.")
+    return "\n".join(lines)
+
+
+def scorecard_report(d: dict) -> str:
+    """Were the suggestions good? (see Autopilot.scorecard)"""
+    lines = ["¿FUERON BUENAS LAS SUGERENCIAS? (puntos reales: Yahoo cuando la 7d los guardó, si no Sleeper "
+             "con la puntuación de tu liga; pateadores aproximados)"]
+    weeks = d["lineups"]
+    if weeks:
+        lines.append("ALINEACIÓN: lo que jugaste · lo que recomendé al final · la mejor posible con tu roster")
+        for w in weeks:
+            tag = "seguiste la recomendación" if w.followed else f"recomendado {w.recommended - w.played:+.1f}"
+            lines.append(f"  S{w.week}: jugaste {w.played:.1f} · recomendado {w.recommended:.1f} · mejor {w.best:.1f} "
+                         f"({tag})" + (f" — {'; '.join(w.differences)}" if w.differences else ""))
+            if w.missing and w.week >= d["current"]:
+                lines.append(f"      (todavía sin puntos: {', '.join(w.missing)})")
+        done = [w for w in weeks if w.week < d["current"]]
+        if done:
+            gain = sum(w.recommended - w.played for w in done)
+            lost = sum(w.best - w.recommended for w in done)
+            lines.append(f"  Total semanas terminadas: seguir la recomendación habría dado {gain:+.1f} pts; aun así quedaron "
+                         f"{lost:.1f} pts en la banca que ninguna proyección veía venir.")
+    for title, items in (("TRADES (después del trade: lo que recibiste − lo que diste)", d["trades"]),
+                         ("ALTAS (el que agregaste − el que soltaste, en las semanas que lo tuviste; "
+                          "en K y DEF casi todo es suerte del rival de esa semana)", d["adds"]),
+                         ("SUGERENCIAS DE PUJAS Y DE LA 5d (el sugerido − el que decía soltar)", d["suggestions"])):
+        if not items:
+            continue
+        lines.append(title)
+        for m in items:
+            verdict = ("sin baja: no hay con qué comparar" if m.kind == "alta" and not m.gave
+                       else "buena" if m.net > 2 else "mala" if m.net < -2 else "neutra")
+            ws = (f"S{m.weeks[0]}-{m.weeks[-1]}" if len(m.weeks) > 1 and m.weeks[-1] - m.weeks[0] + 1 == len(m.weeks)
+                  else "S" + ",".join(str(w) for w in m.weeks))
+            gave = f" por {', '.join(m.gave)} {m.gave_points:.1f}" if m.gave else ""
+            lines.append(f"  {m.date} {ws}: {', '.join(m.got)} {m.got_points:.1f}{gave} → {m.net:+.1f} ({verdict})"
+                         + (f" [{m.note}]" if m.note else ""))
+        total = sum(m.net for m in items if m.gave or m.kind != "alta")
+        lines.append(f"  Neto: {total:+.1f} pts" + (" (sin contar las altas sin baja)" if items is d["adds"] else ""))
+    if not d["suggestions"]:
+        lines.append("Las sugerencias de pujas y de la 5d se guardan desde esta versión: la próxima semana aparecen aquí.")
     return "\n".join(lines)

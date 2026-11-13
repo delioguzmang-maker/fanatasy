@@ -248,7 +248,7 @@ def test_own_projections_replace_yahoo_for_skill_players(tmp_path):
     from synth import SynthSleeper
 
     with MockYahoo() as mock:
-        ap = pilot(mock, tmp_path, sleeper=SynthSleeper(), sleeper_bonus={})
+        ap = pilot(mock, tmp_path, sleeper=SynthSleeper(), sleeper_bonus={}, projections="propia")
         ap.lines_fetcher = lambda: ""
         roster = ap.load_roster(3)
         ap.enrich(roster.players, 3)
@@ -312,3 +312,57 @@ def test_projection_exam_prefers_cell_7d_history(tmp_path):
         res = ap.projection_exam()
         assert not any("/matchup" in g for g in mock.gets)       # no pages needed
         assert res.data["rows"] == 30 and res.data["exam"].yahoo is not None
+
+
+
+def test_auto_uses_yahoo_until_the_own_projection_passes_the_exam(tmp_path):
+    from synth import SynthSleeper
+
+    with MockYahoo() as mock:
+        ap = pilot(mock, tmp_path, sleeper=SynthSleeper(), sleeper_bonus={})      # projections="auto"
+        ap.lines_fetcher = lambda: ""
+        assert ap.cfg.projections == "auto" and ap.own_projections(3) == {}
+        roster = ap.load_roster(3)
+        ap.enrich(roster.players, 3)
+        assert all(p.yahoo_proj is None for p in roster.players)
+        ap.state.data["own_projection_ok"] = True                                # cell 7e: it won
+        assert ap.own_projections(3)
+
+
+def test_scorecard_reads_the_logs_and_the_history(tmp_path):
+    import csv
+    import json
+
+    with open(tmp_path / "historial_proyecciones.csv", "w", newline="") as fh:
+        w = csv.DictWriter(fh, ["semana", "team_id", "jugador", "pos", "puesto", "proy", "real", "nfl", "estado"])
+        w.writeheader()
+        for name, pos, slot, real in (("Brock Purdy", "QB", "QB", 14.0), ("Daniel Jones", "QB", "BN", 20.0),
+                                      ("Jacoby Brissett", "QB", "QB", 9.0)):
+            w.writerow({"semana": 2, "team_id": TEAM, "jugador": name, "pos": pos, "puesto": slot, "proy": 15,
+                        "real": real, "nfl": "SF", "estado": ""})
+    (tmp_path / "decisiones_log.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"week": 2, "yahoo_now": {"Brock Purdy": "QB", "Daniel Jones": "BN"},
+         "recomendado": {"Daniel Jones": "QB", "Brock Purdy": "BN"}},
+        {"week": 2, "tipo": "waivers", "sugerencias": [{"add": "Jacoby Brissett", "add_pos": "QB",
+                                                        "drop": "Daniel Jones", "drop_pos": "QB", "bid": 3}]},
+    ]))
+    with MockYahoo() as mock:
+        ap = pilot(mock, tmp_path)
+        res = ap.scorecard()
+        [lw] = res.data["lineups"]
+        assert (lw.played, lw.recommended, lw.best) == (14.0, 20.0, 20.0)
+        assert res.data["suggestions"][0].net == -11.0
+        assert "seguir la recomendación habría dado +6.0" in res.text
+        assert "+6.0" in res.title
+
+
+def test_waivers_log_their_suggestions(tmp_path):
+    import json
+
+    with MockYahoo() as mock:
+        mock.free_agents["30150"] = ("Michael Pittman Jr.", "WR", "Waivers (Sep 30)", {w: 14.0 for w in range(1, 18)})
+        res = pilot(mock, tmp_path).waivers()
+        logged = [json.loads(x) for x in (tmp_path / "decisiones_log.jsonl").read_text().splitlines()]
+        sug = [r for r in logged if r.get("tipo") == "waivers"]
+        assert res.data["claims"] and sug
+        assert sug[-1]["sugerencias"][0]["add"] == res.data["claims"][0].add.name
